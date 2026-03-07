@@ -1,0 +1,72 @@
+2026-03-06 19:27:14,927 - sms-layer1 - INFO - [-] - layer1_ingestion.py:100 - 🚀 Logger initialized
+2026-03-06 19:27:14,928 - sms-layer1 - INFO - [-] - layer1_ingestion.py:101 - 📋 Log configuration:
+2026-03-06 19:27:14,928 - sms-layer1 - INFO - [-] - layer1_ingestion.py:102 -    - Level: INFO
+2026-03-06 19:27:14,928 - sms-layer1 - INFO - [-] - layer1_ingestion.py:103 -    - Directory: C:\Users\efrem\Desktop\batch_process\send_sms_manage\logs\layer1
+2026-03-06 19:27:14,928 - sms-layer1 - INFO - [-] - layer1_ingestion.py:104 -    - Format: YYYY-MM-DD.log
+2026-03-06 19:27:14,929 - sms-layer1 - INFO - [-] - layer1_ingestion.py:105 -    - Retention: 7 days
+2026-03-06 19:27:15,065 - sms-layer1 - INFO - [-] - layer1_ingestion.py:100 - 🚀 Logger initialized
+2026-03-06 19:27:15,065 - sms-layer1 - INFO - [-] - layer1_ingestion.py:100 - 🚀 Logger initialized
+2026-03-06 19:27:15,066 - sms-layer1 - INFO - [-] - layer1_ingestion.py:101 - 📋 Log configuration:
+2026-03-06 19:27:15,066 - sms-layer1 - INFO - [-] - layer1_ingestion.py:101 - 📋 Log configuration:
+2026-03-06 19:27:15,066 - sms-layer1 - INFO - [-] - layer1_ingestion.py:102 -    - Level: INFO
+2026-03-06 19:27:15,066 - sms-layer1 - INFO - [-] - layer1_ingestion.py:102 -    - Level: INFO
+2026-03-06 19:27:15,067 - sms-layer1 - INFO - [-] - layer1_ingestion.py:103 -    - Directory: C:\Users\efrem\Desktop\batch_process\send_sms_manage\logs\layer1
+2026-03-06 19:27:15,067 - sms-layer1 - INFO - [-] - layer1_ingestion.py:103 -    - Directory: C:\Users\efrem\Desktop\batch_process\send_sms_manage\logs\layer1
+2026-03-06 19:27:15,068 - sms-layer1 - INFO - [-] - layer1_ingestion.py:104 -    - Format: YYYY-MM-DD.log
+2026-03-06 19:27:15,068 - sms-layer1 - INFO - [-] - layer1_ingestion.py:104 -    - Format: YYYY-MM-DD.log
+2026-03-06 19:27:15,068 - sms-layer1 - INFO - [-] - layer1_ingestion.py:105 -    - Retention: 7 days
+2026-03-06 19:27:15,068 - sms-layer1 - INFO - [-] - layer1_ingestion.py:105 -    - Retention: 7 days
+2026-03-06 20:42:42,540 - sms-layer1 - INFO - [-] - layer1_ingestion.py:100 - 🚀 Logger initialized
+2026-03-06 20:42:42,540 - sms-layer1 - INFO - [-] - layer1_ingestion.py:101 - 📋 Log configuration:
+2026-03-06 20:42:42,540 - sms-layer1 - INFO - [-] - layer1_ingestion.py:102 -    - Level: INFO
+2026-03-06 20:42:42,541 - sms-layer1 - INFO - [-] - layer1_ingestion.py:103 -    - Directory: C:\Users\efrem\Desktop\batch_process\send_sms_manage\logs\layer1
+2026-03-06 20:42:42,541 - sms-layer1 - INFO - [-] - layer1_ingestion.py:104 -    - Format: YYYY-MM-DD.log
+2026-03-06 20:42:42,542 - sms-layer1 - INFO - [-] - layer1_ingestion.py:105 -    - Retention: 7 days
+2026-03-06 20:42:42,798 - sms-layer1 - INFO - [-] - layer1_ingestion.py:100 - 🚀 Logger initialized
+2026-03-06 20:42:42,798 - sms-layer1 - INFO - [-] - layer1_ingestion.py:100 - 🚀 Logger initialized
+2026-03-06 20:42:42,799 - sms-layer1 - INFO - [-] - layer1_ingestion.py:101 - 📋 Log configuration:
+2026-03-06 20:42:42,799 - sms-layer1 - INFO - [-] - layer1_ingestion.py:101 - 📋 Log configuration:
+2026-03-06 20:42:42,799 - sms-layer1 - INFO - [-] - layer1_ingestion.py:102 -    - Level: INFO
+2026-03-06 20:42:42,799 - sms-layer1 - INFO - [-] - layer1_ingestion.py:102 -    - Level: INFO
+2026-03-06 20:42:42,799 - sms-layer1 - INFO - [-] - layer1_ingestion.py:103 -    - Directory: C:\Users\efrem\Desktop\batch_process\send_sms_manage\logs\layer1
+2026-03-06 20:42:42,799 - sms-layer1 - INFO - [-] - layer1_ingestion.py:103 -    - Directory: C:\Users\efrem\Desktop\batch_process\send_sms_manage\logs\layer1
+2026-03-06 20:42:42,799 - sms-layer1 - INFO - [-] - layer1_ingestion.py:104 -    - Format: YYYY-MM-DD.log
+2026-03-06 20:42:42,799 - sms-layer1 - INFO - [-] - layer1_ingestion.py:104 -    - Format: YYYY-MM-DD.log
+2026-03-06 20:42:42,800 - sms-layer1 - INFO - [-] - layer1_ingestion.py:105 -    - Retention: 7 days
+2026-03-06 20:42:42,800 - sms-layer1 - INFO - [-] - layer1_ingestion.py:105 -    - Retention: 7 days
+2026-03-06 20:45:10,238 - sms-layer1 - INFO - [-] - layer1_ingestion.py:100 - 🚀 Logger initialized
+2026-03-06 20:45:10,238 - sms-layer1 - INFO - [-] - layer1_ingestion.py:101 - 📋 Log configuration:
+2026-03-06 20:45:10,238 - sms-layer1 - INFO - [-] - layer1_ingestion.py:102 -    - Level: INFO
+2026-03-06 20:45:10,238 - sms-layer1 - INFO - [-] - layer1_ingestion.py:103 -    - Directory: C:\Users\efrem\Desktop\batch_process\send_sms_manage\logs\layer1
+2026-03-06 20:45:10,238 - sms-layer1 - INFO - [-] - layer1_ingestion.py:104 -    - Format: YYYY-MM-DD.log
+2026-03-06 20:45:10,238 - sms-layer1 - INFO - [-] - layer1_ingestion.py:105 -    - Retention: 7 days
+2026-03-06 20:45:10,352 - sms-layer1 - INFO - [-] - layer1_ingestion.py:100 - 🚀 Logger initialized
+2026-03-06 20:45:10,352 - sms-layer1 - INFO - [-] - layer1_ingestion.py:100 - 🚀 Logger initialized
+2026-03-06 20:45:10,356 - sms-layer1 - INFO - [-] - layer1_ingestion.py:101 - 📋 Log configuration:
+2026-03-06 20:45:10,356 - sms-layer1 - INFO - [-] - layer1_ingestion.py:101 - 📋 Log configuration:
+2026-03-06 20:45:10,356 - sms-layer1 - INFO - [-] - layer1_ingestion.py:102 -    - Level: INFO
+2026-03-06 20:45:10,356 - sms-layer1 - INFO - [-] - layer1_ingestion.py:102 -    - Level: INFO
+2026-03-06 20:45:10,356 - sms-layer1 - INFO - [-] - layer1_ingestion.py:103 -    - Directory: C:\Users\efrem\Desktop\batch_process\send_sms_manage\logs\layer1
+2026-03-06 20:45:10,356 - sms-layer1 - INFO - [-] - layer1_ingestion.py:103 -    - Directory: C:\Users\efrem\Desktop\batch_process\send_sms_manage\logs\layer1
+2026-03-06 20:45:10,356 - sms-layer1 - INFO - [-] - layer1_ingestion.py:104 -    - Format: YYYY-MM-DD.log
+2026-03-06 20:45:10,356 - sms-layer1 - INFO - [-] - layer1_ingestion.py:104 -    - Format: YYYY-MM-DD.log
+2026-03-06 20:45:10,356 - sms-layer1 - INFO - [-] - layer1_ingestion.py:105 -    - Retention: 7 days
+2026-03-06 20:45:10,356 - sms-layer1 - INFO - [-] - layer1_ingestion.py:105 -    - Retention: 7 days
+2026-03-06 20:56:17,830 - sms-layer1 - INFO - [-] - layer1_ingestion.py:100 - 🚀 Logger initialized
+2026-03-06 20:56:17,830 - sms-layer1 - INFO - [-] - layer1_ingestion.py:101 - 📋 Log configuration:
+2026-03-06 20:56:17,830 - sms-layer1 - INFO - [-] - layer1_ingestion.py:102 -    - Level: INFO
+2026-03-06 20:56:17,830 - sms-layer1 - INFO - [-] - layer1_ingestion.py:103 -    - Directory: C:\Users\efrem\Desktop\batch_process\send_sms_manage\logs\layer1
+2026-03-06 20:56:17,830 - sms-layer1 - INFO - [-] - layer1_ingestion.py:104 -    - Format: YYYY-MM-DD.log
+2026-03-06 20:56:17,831 - sms-layer1 - INFO - [-] - layer1_ingestion.py:105 -    - Retention: 7 days
+2026-03-06 20:56:17,905 - sms-layer1 - INFO - [-] - layer1_ingestion.py:100 - 🚀 Logger initialized
+2026-03-06 20:56:17,905 - sms-layer1 - INFO - [-] - layer1_ingestion.py:100 - 🚀 Logger initialized
+2026-03-06 20:56:17,907 - sms-layer1 - INFO - [-] - layer1_ingestion.py:101 - 📋 Log configuration:
+2026-03-06 20:56:17,907 - sms-layer1 - INFO - [-] - layer1_ingestion.py:101 - 📋 Log configuration:
+2026-03-06 20:56:17,908 - sms-layer1 - INFO - [-] - layer1_ingestion.py:102 -    - Level: INFO
+2026-03-06 20:56:17,908 - sms-layer1 - INFO - [-] - layer1_ingestion.py:102 -    - Level: INFO
+2026-03-06 20:56:17,908 - sms-layer1 - INFO - [-] - layer1_ingestion.py:103 -    - Directory: C:\Users\efrem\Desktop\batch_process\send_sms_manage\logs\layer1
+2026-03-06 20:56:17,908 - sms-layer1 - INFO - [-] - layer1_ingestion.py:103 -    - Directory: C:\Users\efrem\Desktop\batch_process\send_sms_manage\logs\layer1
+2026-03-06 20:56:17,909 - sms-layer1 - INFO - [-] - layer1_ingestion.py:104 -    - Format: YYYY-MM-DD.log
+2026-03-06 20:56:17,909 - sms-layer1 - INFO - [-] - layer1_ingestion.py:104 -    - Format: YYYY-MM-DD.log
+2026-03-06 20:56:17,909 - sms-layer1 - INFO - [-] - layer1_ingestion.py:105 -    - Retention: 7 days
+2026-03-06 20:56:17,909 - sms-layer1 - INFO - [-] - layer1_ingestion.py:105 -    - Retention: 7 days

@@ -94,10 +94,11 @@ class AudienceSerializer(serializers.ModelSerializer):
     """Enhanced Audience serializer with phone number validation"""
     
     summary = serializers.SerializerMethodField(read_only=True)
+    database_info = serializers.SerializerMethodField(read_only=True)
     
     class Meta:
         model = Audience
-        exclude = ['campaign']
+        exclude = ['campaign', 'recipients']  # ❌ Explicitly exclude recipients from API
         read_only_fields = ['created_at', 'updated_at', 'total_count', 'valid_count', 'invalid_count']
 
     def get_summary(self, obj):
@@ -107,11 +108,26 @@ class AudienceSerializer(serializers.ModelSerializer):
             'valid': obj.valid_count,
             'invalid': obj.invalid_count
         }
+    
+    def get_database_info(self, obj):
+        """Return database information for Layer 2 to fetch recipients directly"""
+        return {
+            'table': 'scheduler_manager_audience',
+            'campaign_id_column': 'campaign_id',
+            'id_column': 'id',
+            'msisdn_column': 'msisdn',
+            'language_column': 'language',
+            'variables_column': 'variables',
+            'status_column': 'status',
+            'index_hint': 'idx_audience_campaign_id_id',
+            'partition_hint': f"campaign_id = {obj.campaign_id}"  # For partitioning
+        }
 
     def validate_recipients(self, value):
         """
         Enhanced validation for recipients list.
         Validates structure and phone number format.
+        This is only used during creation/update, NOT in responses.
         """
         if not isinstance(value, list):
             raise serializers.ValidationError("recipients must be a list")
@@ -222,13 +238,33 @@ class AudienceSerializer(serializers.ModelSerializer):
         return super().update(instance, validated_data)
 
 
+class CheckpointInfoSerializer(serializers.ModelSerializer):
+    """Serializer for checkpoint information"""
+    
+    class Meta:
+        model = Checkpoint
+        fields = ['last_processed_index', 'status', 'updated_at']
+
+
+class CampaignProgressSerializer(serializers.ModelSerializer):
+    """Serializer for campaign progress"""
+    
+    campaign_name = serializers.CharField(source='campaign.name', read_only=True)
+    
+    class Meta:
+        model = CampaignProgress
+        fields = '__all__'
+        read_only_fields = ['started_at', 'updated_at']
+
+
 class CampaignSerializer(serializers.ModelSerializer):
     """Enhanced Campaign serializer with nested related data"""
     
     schedule = ScheduleSerializer(read_only=True)
     message_content = MessageContentSerializer(read_only=True)
-    audience = AudienceSerializer(read_only=True)
+    audience = AudienceSerializer(read_only=True)  # This now excludes recipients
     progress = serializers.SerializerMethodField(read_only=True)
+    checkpoint_info = serializers.SerializerMethodField(read_only=True)
     can_start = serializers.BooleanField(read_only=True)
     can_pause = serializers.BooleanField(read_only=True)
     can_complete = serializers.BooleanField(read_only=True)
@@ -237,7 +273,7 @@ class CampaignSerializer(serializers.ModelSerializer):
         model = Campaign
         fields = [
             'id', 'name', 'status', 'created_by', 'created_at', 'updated_at',
-            'schedule', 'message_content', 'audience', 'progress',
+            'schedule', 'message_content', 'audience', 'progress', 'checkpoint_info',
             'can_start', 'can_pause', 'can_complete', 'is_deleted'
         ]
         read_only_fields = ['created_at', 'updated_at', 'created_by', 'is_deleted']
@@ -253,7 +289,33 @@ class CampaignSerializer(serializers.ModelSerializer):
                 'progress_percent': float(obj.progress.progress_percent),
                 'status': obj.progress.status
             }
-        return None
+        return {
+            'total_messages': 0,
+            'sent_count': 0,
+            'failed_count': 0,
+            'pending_count': 0,
+            'progress_percent': 0.0,
+            'status': 'PENDING'
+        }
+    
+    def get_checkpoint_info(self, obj):
+        """Get checkpoint information for resume capability"""
+        try:
+            checkpoint = Checkpoint.objects.get(campaign=obj)
+            return {
+                'has_checkpoint': True,
+                'last_processed': checkpoint.last_processed_index,
+                'status': checkpoint.status,
+                'updated_at': checkpoint.updated_at,
+                'table': 'scheduler_manager_checkpoint'
+            }
+        except Checkpoint.DoesNotExist:
+            return {
+                'has_checkpoint': False,
+                'last_processed': 0,
+                'status': 'NEW',
+                'table': 'scheduler_manager_checkpoint'
+            }
 
     def create(self, validated_data):
         """Create campaign with current user as creator"""
@@ -342,17 +404,6 @@ class CampaignAudienceSerializer(serializers.ModelSerializer):
         context = self.context.copy()
         serializer = AudienceSerializer(context=context)
         return serializer.validate_recipients(value)
-
-
-class CampaignProgressSerializer(serializers.ModelSerializer):
-    """Serializer for campaign progress"""
-    
-    campaign_name = serializers.CharField(source='campaign.name', read_only=True)
-    
-    class Meta:
-        model = CampaignProgress
-        fields = '__all__'
-        read_only_fields = ['started_at', 'updated_at']
 
 
 class BatchStatusSerializer(serializers.ModelSerializer):
@@ -514,6 +565,8 @@ class UserSerializer(serializers.ModelSerializer):
         
         user.save()
         return user
+
+
 # Export all serializers
 __all__ = [
     'ScheduleSerializer',
@@ -530,4 +583,5 @@ __all__ = [
     'MessageStatusBulkCreateSerializer',
     'CheckpointSerializer',
     'CampaignActionSerializer',
+    'CheckpointInfoSerializer',
 ]

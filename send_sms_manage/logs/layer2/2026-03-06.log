@@ -1,0 +1,66 @@
+2026-03-06 20:51:40,336 - layer2 - INFO - [-] - layer2_queue_builder.py:116 - 🚀 Layer 2 Logger initialized
+2026-03-06 20:51:40,337 - layer2 - INFO - [-] - layer2_queue_builder.py:117 - 📋 Log configuration:
+2026-03-06 20:51:40,337 - layer2 - INFO - [-] - layer2_queue_builder.py:118 -    - Level: INFO
+2026-03-06 20:51:40,338 - layer2 - INFO - [-] - layer2_queue_builder.py:119 -    - Directory: C:\Users\efrem\Desktop\batch_process\send_sms_manage\logs\layer2
+2026-03-06 20:51:40,338 - layer2 - INFO - [-] - layer2_queue_builder.py:120 -    - Format: YYYY-MM-DD.log
+2026-03-06 20:51:40,338 - layer2 - INFO - [-] - layer2_queue_builder.py:121 -    - Retention: 7 days
+2026-03-06 20:51:40,362 - layer2 - INFO - [-] - layer2_queue_builder.py:644 - ============================================================
+2026-03-06 20:51:40,363 - layer2 - INFO - [-] - layer2_queue_builder.py:645 - 🚀 Starting Layer 2: Campaign Execution Engine
+2026-03-06 20:51:40,363 - layer2 - INFO - [-] - layer2_queue_builder.py:646 - ============================================================
+2026-03-06 20:51:40,363 - layer2 - INFO - [-] - layer2_queue_builder.py:647 - 📋 Configuration:
+2026-03-06 20:51:40,364 - layer2 - INFO - [-] - layer2_queue_builder.py:648 -    - Kafka: localhost:9092
+2026-03-06 20:51:40,364 - layer2 - INFO - [-] - layer2_queue_builder.py:649 -    - Command Topic: sms-commands
+2026-03-06 20:51:40,364 - layer2 - INFO - [-] - layer2_queue_builder.py:650 -    - Progress Topic: sms-batch-started
+2026-03-06 20:51:40,365 - layer2 - INFO - [-] - layer2_queue_builder.py:651 -    - Django API: http://localhost:8000
+2026-03-06 20:51:40,365 - layer2 - INFO - [-] - layer2_queue_builder.py:652 -    - PostgreSQL: localhost:5432/campaign_db
+2026-03-06 20:51:40,365 - layer2 - INFO - [-] - layer2_queue_builder.py:653 -    - Redis: redis://localhost:6379/0
+2026-03-06 20:51:40,365 - layer2 - INFO - [-] - layer2_queue_builder.py:654 -    - Batch Size: 50000
+2026-03-06 20:51:40,366 - layer2 - INFO - [-] - layer2_queue_builder.py:655 -    - Max Queue Size: 500000
+2026-03-06 20:51:40,366 - layer2 - INFO - [-] - layer2_queue_builder.py:656 -    - Log Directory: C:\Users\efrem\Desktop\batch_process\send_sms_manage\logs\layer2
+2026-03-06 20:51:40,366 - layer2 - INFO - [-] - layer2_queue_builder.py:657 - ============================================================
+2026-03-06 20:51:44,869 - layer2 - ERROR - [-] - layer2_queue_builder.py:675 - ❌ Fatal error: KafkaConnectionError: Unable to bootstrap from [('localhost', 9092, <AddressFamily.AF_UNSPEC: 0>)]
+Traceback (most recent call last):
+  File "C:\Users\efrem\Desktop\batch_process\send_sms_manage\layer2_queue_builder.py", line 665, in main
+    await consumer.start()
+  File "C:\Users\efrem\Desktop\batch_process\send_sms_manage\layer2_queue_builder.py", line 314, in start
+    await self.consumer.start()
+  File "C:\Users\efrem\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiokafka\consumer\consumer.py", line 356, in start
+    await self._client.bootstrap()
+  File "C:\Users\efrem\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiokafka\client.py", line 249, in bootstrap
+    raise KafkaConnectionError(
+aiokafka.errors.KafkaConnectionError: KafkaConnectionError: Unable to bootstrap from [('localhost', 9092, <AddressFamily.AF_UNSPEC: 0>)]
+2026-03-06 20:51:44,920 - layer2 - INFO - [-] - layer2_queue_builder.py:679 - 👋 Layer 2 stopped
+2026-03-06 20:57:43,742 - layer2 - INFO - [-] - layer2_queue_builder.py:122 - 🚀 Layer 2 Logger initialized
+2026-03-06 20:57:43,743 - layer2 - INFO - [-] - layer2_queue_builder.py:123 - 📋 Log configuration:
+2026-03-06 20:57:43,743 - layer2 - INFO - [-] - layer2_queue_builder.py:124 -    - Level: INFO
+2026-03-06 20:57:43,743 - layer2 - INFO - [-] - layer2_queue_builder.py:125 -    - Directory: C:\Users\efrem\Desktop\batch_process\send_sms_manage\logs\layer2
+2026-03-06 20:57:43,743 - layer2 - INFO - [-] - layer2_queue_builder.py:126 -    - Format: YYYY-MM-DD.log
+2026-03-06 20:57:43,743 - layer2 - INFO - [-] - layer2_queue_builder.py:127 -    - Retention: 7 days
+2026-03-06 20:57:43,745 - layer2 - INFO - [-] - layer2_queue_builder.py:650 - ============================================================
+2026-03-06 20:57:43,745 - layer2 - INFO - [-] - layer2_queue_builder.py:651 - 🚀 Starting Layer 2: Campaign Execution Engine
+2026-03-06 20:57:43,745 - layer2 - INFO - [-] - layer2_queue_builder.py:652 - ============================================================
+2026-03-06 20:57:43,745 - layer2 - INFO - [-] - layer2_queue_builder.py:653 - 📋 Configuration:
+2026-03-06 20:57:43,745 - layer2 - INFO - [-] - layer2_queue_builder.py:654 -    - Kafka: localhost:9092
+2026-03-06 20:57:43,746 - layer2 - INFO - [-] - layer2_queue_builder.py:655 -    - Command Topic: sms-commands
+2026-03-06 20:57:43,746 - layer2 - INFO - [-] - layer2_queue_builder.py:656 -    - Progress Topic: sms-batch-started
+2026-03-06 20:57:43,746 - layer2 - INFO - [-] - layer2_queue_builder.py:657 -    - Django API: http://localhost:8000
+2026-03-06 20:57:43,746 - layer2 - INFO - [-] - layer2_queue_builder.py:658 -    - PostgreSQL: localhost:5432/campaign_db
+2026-03-06 20:57:43,746 - layer2 - INFO - [-] - layer2_queue_builder.py:659 -    - Redis: redis://localhost:6379/0
+2026-03-06 20:57:43,747 - layer2 - INFO - [-] - layer2_queue_builder.py:660 -    - Batch Size: 50000
+2026-03-06 20:57:43,747 - layer2 - INFO - [-] - layer2_queue_builder.py:661 -    - Max Queue Size: 500000
+2026-03-06 20:57:43,747 - layer2 - INFO - [-] - layer2_queue_builder.py:662 -    - Log Directory: C:\Users\efrem\Desktop\batch_process\send_sms_manage\logs\layer2
+2026-03-06 20:57:43,747 - layer2 - INFO - [-] - layer2_queue_builder.py:663 - ============================================================
+2026-03-06 20:57:43,748 - aiokafka.consumer.subscription_state - INFO - [-] - subscription_state.py:109 - Updating subscribed topics to: frozenset({'sms-commands'})
+2026-03-06 20:57:47,841 - aiokafka - ERROR - [-] - client.py:224 - Unable connect to "localhost:9092": [WinError 1225] The remote computer refused the network connection
+2026-03-06 20:57:47,842 - layer2 - ERROR - [-] - layer2_queue_builder.py:681 - ❌ Fatal error: KafkaConnectionError: Unable to bootstrap from [('localhost', 9092, <AddressFamily.AF_UNSPEC: 0>)]
+Traceback (most recent call last):
+  File "C:\Users\efrem\Desktop\batch_process\send_sms_manage\layer2_queue_builder.py", line 671, in main
+    await consumer.start()
+  File "C:\Users\efrem\Desktop\batch_process\send_sms_manage\layer2_queue_builder.py", line 320, in start
+    await self.consumer.start()
+  File "C:\Users\efrem\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiokafka\consumer\consumer.py", line 356, in start
+    await self._client.bootstrap()
+  File "C:\Users\efrem\AppData\Local\Programs\Python\Python311\Lib\site-packages\aiokafka\client.py", line 249, in bootstrap
+    raise KafkaConnectionError(
+aiokafka.errors.KafkaConnectionError: KafkaConnectionError: Unable to bootstrap from [('localhost', 9092, <AddressFamily.AF_UNSPEC: 0>)]
+2026-03-06 20:57:47,871 - layer2 - INFO - [-] - layer2_queue_builder.py:685 - 👋 Layer 2 stopped

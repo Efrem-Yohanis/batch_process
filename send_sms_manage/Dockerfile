@@ -3,12 +3,25 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install dependencies
+# Install system dependencies (for asyncpg, etc.)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    libpq-dev \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements first for better caching
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy Python source files
+# Create log directories
+RUN mkdir -p /app/logs/layer1 /app/logs/layer2
+
+# Copy all Python source files
 COPY *.py .
+
+# Make scripts executable
+RUN chmod +x *.py
 
 # Expose Layer 1 API port
 EXPOSE 8001

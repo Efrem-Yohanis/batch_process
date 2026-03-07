@@ -100,10 +100,10 @@ DATABASES = {
         'ENGINE': 'django.db.backends.sqlite3',
         'NAME': BASE_DIR / 'db.sqlite3',
         # Optional: Add these for better performance
-        'OPTIONS': {
-            'timeout': 20,  # Increase timeout for busy database
-            'transaction_mode': 'IMMEDIATE',  # Better concurrency
-        },
+        # 'OPTIONS': {
+        #     'timeout': 20,  # Increase timeout for busy database
+        #     'transaction_mode': 'IMMEDIATE',  # Better concurrency
+        # },
     }
 }
 
