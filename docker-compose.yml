@@ -1,7 +1,14 @@
 version: '3.8'
 
+# Default logging configuration for all services
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
-  # --- DATABASES ---
+  # =============== DATABASES ===============
   airflow-db:
     image: postgres:14
     container_name: airflow-postgres
@@ -17,6 +24,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    logging: *default-logging
     networks:
       - scheduler-network
 
@@ -28,15 +36,16 @@ services:
       POSTGRES_USER: campaign_user
       POSTGRES_PASSWORD: campaign_pass
       POSTGRES_DB: campaign_db
-    volumes:
-      - campaign-postgres-data:/var/lib/postgresql/data
     ports:
       - "5433:5432"
+    volumes:
+      - campaign-postgres-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U campaign_user -d campaign_db"]
       interval: 5s
       timeout: 5s
       retries: 5
+    logging: *default-logging
     networks:
       - scheduler-network
 
@@ -46,15 +55,19 @@ services:
     restart: unless-stopped
     ports:
       - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 5
+    logging: *default-logging
     networks:
       - scheduler-network
 
-  # --- DJANGO APP ---
+  # =============== DJANGO CAMPAIGN MANAGER ===============
   django-app:
     build:
       context: . 
@@ -66,7 +79,8 @@ services:
         echo 'Waiting for database...' &&
         sleep 5 &&
         python manage.py migrate --noinput &&
-        echo '✅ Migrations complete' &&
+        echo ' Migrations complete' &&
+        echo \"from django.contrib.auth import get_user_model; User = get_user_model(); User.objects.filter(username='admin').exists() or User.objects.create_superuser('admin', 'admin@example.com', 'admin123')\" | python manage.py shell &&
         python manage.py runserver 0.0.0.0:8000
       "
     depends_on:
@@ -80,20 +94,25 @@ services:
       DB_USER: campaign_user
       DB_PASSWORD: campaign_pass
       PYTHONUNBUFFERED: 1
+      DJANGO_SUPERUSER_USERNAME: admin
+      DJANGO_SUPERUSER_PASSWORD: admin123
+      DJANGO_SUPERUSER_EMAIL: admin@example.com
     ports:
       - "8000:8000"
     volumes:
       - ./django_project:/app
+      - django-static:/app/staticfiles
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/admin"]
       interval: 30s
       timeout: 10s
       retries: 5
       start_period: 40s
+    logging: *default-logging
     networks:
       - scheduler-network
 
-  # --- AIRFLOW ---
+  # =============== AIRFLOW SCHEDULER ===============
   airflow-init:
     image: apache/airflow:2.7.1
     container_name: airflow-init
@@ -107,7 +126,12 @@ services:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__CORE__LOAD_EXAMPLES: 'False'
       AIRFLOW_UID: 50000
-      AIRFLOW__CORE__FERNET_KEY: ''
+      AIRFLOW__CORE__FERNET_KEY: 'd6VjzXnYr5u8x/A?D*G-KaPdSgVkYp3s'
+      AIRFLOW__WEBSERVER__SECRET_KEY: '5u8x/A?D(G+KbPeShVmYq3t6w9z$$C&F)'
+      # Custom environment variables for SMS system
+      DJANGO_API_URL: http://django-app:8000
+      LAYER1_API_URL: http://sms-layer1:8001
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
     volumes:
       - ./airflow-sms-scheduler/dags:/opt/airflow/dags
     command: >
@@ -115,6 +139,7 @@ services:
         airflow db migrate &&
         airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com 2>/dev/null || true
       "
+    logging: *default-logging
     networks:
       - scheduler-network
 
@@ -122,13 +147,14 @@ services:
     image: apache/airflow:2.7.1
     container_name: airflow-webserver
     restart: unless-stopped
+    user: "0:0"
     depends_on:
       airflow-init:
         condition: service_completed_successfully
     environment: *airflow-common-env
     volumes:
       - ./airflow-sms-scheduler/dags:/opt/airflow/dags
-      - ./airflow-sms-scheduler/logs:/opt/airflow/logs
+      - airflow-logs:/opt/airflow/logs
     ports:
       - "8080:8080"
     command: webserver
@@ -137,6 +163,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
+    logging: *default-logging
     networks:
       - scheduler-network
 
@@ -144,18 +171,20 @@ services:
     image: apache/airflow:2.7.1
     container_name: airflow-scheduler
     restart: unless-stopped
+    user: "0:0"
     depends_on:
       airflow-init:
         condition: service_completed_successfully
     environment: *airflow-common-env
     volumes:
       - ./airflow-sms-scheduler/dags:/opt/airflow/dags
-      - ./airflow-sms-scheduler/logs:/opt/airflow/logs
+      - airflow-logs:/opt/airflow/logs
     command: scheduler
+    logging: *default-logging
     networks:
       - scheduler-network
 
-  # --- KAFKA & ZOOKEEPER ---
+  # =============== KAFKA & ZOOKEEPER ===============
   zookeeper:
     image: wurstmeister/zookeeper:latest
     container_name: zookeeper
@@ -170,6 +199,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    logging: *default-logging
     networks:
       - scheduler-network
 
@@ -186,7 +216,7 @@ services:
       KAFKA_ADVERTISED_HOST_NAME: kafka
       KAFKA_ADVERTISED_PORT: 9092
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_CREATE_TOPICS: "sms-commands:3:1,sms-batches:6:1"
+      KAFKA_CREATE_TOPICS: "sms-commands:3:1,sms-batch-started:3:1,sms-delivery-status:3:1,sms-retry:1:1"
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
       KAFKA_DELETE_TOPIC_ENABLE: "true"
       KAFKA_LOG_RETENTION_HOURS: 168
@@ -199,10 +229,11 @@ services:
       timeout: 10s
       retries: 10
       start_period: 40s
+    logging: *default-logging
     networks:
       - scheduler-network
 
-  # --- CUSTOM LAYERS (send_sms_manage) ---
+  # =============== LAYER 1: COMMAND INGESTION ===============
   sms-layer1:
     build: ./send_sms_manage
     container_name: sms-layer1
@@ -210,43 +241,72 @@ services:
     ports:
       - "8001:8001"
     environment:
-      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-      PYTHONUNBUFFERED: 1
+      - SERVICE_NAME=layer1
+      - LOG_LEVEL=INFO
+      - LOG_DIR=/app/logs/layer1
+      - LOG_RETENTION_DAYS=7
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - KAFKA_COMMAND_TOPIC=sms-commands
+      - CAMPAIGN_MANAGER_URL=http://django-app:8000
+      - DJANGO_USERNAME=test
+      - DJANGO_PASSWORD=test
+      - PYTHONUNBUFFERED=1
     volumes:
+      # Use named volume for logs (no permission issues)
+      - layer1-logs:/app/logs/layer1
+      # Mount code - NOT read-only to allow reload
       - ./send_sms_manage:/app
-    command: uvicorn layer1_ingestion:app --host 0.0.0.0 --port 8001 --reload
+    command: python -m uvicorn layer1_ingestion:app --host 0.0.0.0 --port 8001 --reload
     depends_on:
       kafka:
         condition: service_healthy
+      django-app:
+        condition: service_started
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8001/docs"]
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
+    logging: *default-logging
     networks:
       - scheduler-network
 
-  sms-slicer:
+  # =============== LAYER 2: EXECUTION ENGINE ===============
+  sms-layer2:
     build: ./send_sms_manage
-    container_name: sms-slicer
+    container_name: sms-layer2
     restart: unless-stopped
+    ports:
+      - "8003:8003"  # Health check port
     environment:
-      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-      REDIS_URL: redis://redis:6379
-      DJANGO_SETTINGS_MODULE: myproject.settings
-      DB_HOST: campaign-db
-      DB_PORT: 5432
-      DB_NAME: campaign_db
-      DB_USER: campaign_user
-      DB_PASSWORD: campaign_pass
-      PYTHONPATH: /app:/app/project_root
-      PYTHONUNBUFFERED: 1
+      - SERVICE_NAME=layer2
+      - LOG_LEVEL=INFO
+      - LOG_DIR=/app/logs/layer2
+      - LOG_RETENTION_DAYS=7
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - KAFKA_COMMAND_TOPIC=sms-commands
+      - KAFKA_PROGRESS_TOPIC=sms-batch-started
+      - KAFKA_CONSUMER_GROUP=layer2-engine
+      - CAMPAIGN_MANAGER_URL=http://django-app:8000
+      - DJANGO_USERNAME=test
+      - DJANGO_PASSWORD=test
+      - POSTGRES_DSN=postgresql://campaign_user:campaign_pass@campaign-db:5432/campaign_db
+      - REDIS_URL=redis://redis:6379/0
+      - REDIS_QUEUE_KEY=sms:dispatch:queue
+      - BATCH_SIZE=50000
+      - MAX_QUEUE_SIZE=500000
+      - PYTHONPATH=/app
+      - PYTHONUNBUFFERED=1
+      - HEALTH_PORT=8003
     volumes:
+      # Use named volume for logs
+      - layer2-logs:/app/logs/layer2
+      # Mount code - NOT read-only for execution
       - ./send_sms_manage:/app
-      - .:/app/project_root
-      - ./django_project:/app/django_project
-    command: python -u layer2_queue_builder.py
+      # Mount django_project for access
+      - ./django_project:/django_project
+    command: python -u /app/layer2_queue_builder.py
     depends_on:
       kafka:
         condition: service_healthy
@@ -256,14 +316,71 @@ services:
         condition: service_healthy
       django-app:
         condition: service_started
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    logging: *default-logging
     networks:
       - scheduler-network
 
+  # =============== LAYER 3: SMS SENDER ===============
+  sms-layer3:
+    build: ./send_sms_manage
+    container_name: sms-layer3
+    restart: unless-stopped
+    ports:
+      - "8002:8002"
+    environment:
+      - SERVICE_NAME=layer3
+      - LOG_LEVEL=INFO
+      - LOG_DIR=/app/logs/layer3
+      - LOG_RETENTION_DAYS=7
+      - REDIS_URL=redis://redis:6379/0
+      - REDIS_QUEUE_KEY=sms:dispatch:queue
+      - REDIS_RETRY_KEY=sms:retry:queue
+      - BATCH_SIZE=1000
+      - MAX_TPS=4000
+      - WORKER_COUNT=4
+      - MAX_RETRIES=3
+      - RETRY_DELAY_1=60
+      - RETRY_DELAY_2=300
+      - RETRY_DELAY_3=900
+      - API_URL=https://api.your-sms-provider.com/v1/send
+      - API_KEY=your-actual-api-key-here
+      - API_TIMEOUT=5
+      - DJANGO_URL=http://django-app:8000
+      - DJANGO_USERNAME=test
+      - DJANGO_PASSWORD=test
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - KAFKA_DELIVERY_TOPIC=sms-delivery-status
+      - PYTHONUNBUFFERED=1
+    volumes:
+      # Use named volume for logs
+      - layer3-logs:/app/logs/layer3
+      # Mount code - NOT read-only
+      - ./send_sms_manage:/app
+    command: python -u /app/layer3_sender.py
+    depends_on:
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      django-app:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    logging: *default-logging
+    networks:
+      - scheduler-network
+
+  # =============== KAFKA UI (monitoring) ===============
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
     container_name: kafka-ui
@@ -274,9 +391,26 @@ services:
       KAFKA_CLUSTERS_0_NAME: local
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
       KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+      KAFKA_CLUSTERS_0_TOPICS: sms-commands,sms-batch-started,sms-delivery-status
     depends_on:
       kafka:
         condition: service_healthy
+    logging: *default-logging
+    networks:
+      - scheduler-network
+
+  # =============== REDIS COMMANDER (Redis UI) ===============
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: redis-commander
+    restart: unless-stopped
+    ports:
+      - "8083:8081"
+    environment:
+      - REDIS_HOSTS=local:redis:6379
+    depends_on:
+      - redis
+    logging: *default-logging
     networks:
       - scheduler-network
 
@@ -285,5 +419,14 @@ networks:
     driver: bridge
 
 volumes:
+  # Named volumes for logs (managed by Docker, no permission issues)
+  layer1-logs:
+  layer2-logs:
+  layer3-logs:
+  airflow-logs:
+  
+  # Your existing volumes
   airflow-postgres-data:
   campaign-postgres-data:
+  redis-data:
+  django-static:

@@ -8,6 +8,7 @@ import json
 import uuid
 import asyncio
 import logging
+import time
 from logging.handlers import TimedRotatingFileHandler, RotatingFileHandler
 import httpx
 from datetime import datetime
@@ -20,15 +21,34 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from pydantic import BaseModel, Field, validator
 from aiokafka import AIOKafkaProducer
 
+# =============== DOCKER-SPECIFIC DEFAULTS ===============
+DOCKER_DEFAULTS = {
+    "KAFKA_BOOTSTRAP_SERVERS": "kafka:9092",
+    "CAMPAIGN_MANAGER_URL": "http://django-app:8000",
+    "DJANGO_USERNAME": "test",
+    "DJANGO_PASSWORD": "test",
+    "LOG_LEVEL": "INFO",
+    "LOG_DIR": "/app/logs/layer1",
+    "LOG_RETENTION_DAYS": "7",
+    "KAFKA_COMMAND_TOPIC": "sms-commands",
+    "SERVICE_NAME": "layer1"
+}
+
+# Set defaults for any missing environment variables
+for key, value in DOCKER_DEFAULTS.items():
+    if key not in os.environ:
+        os.environ[key] = value
+
 # =============== PRODUCTION LOGGING CONFIGURATION ===============
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
-LOG_DIR = os.getenv("LOG_DIR", "logs/layer1")
+LOG_DIR = os.getenv("LOG_DIR", "/app/logs/layer1")
 LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "7"))
 LOG_WHEN = os.getenv("LOG_WHEN", "midnight")
 LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(100 * 1024 * 1024)))  # 100MB fallback
 
 # Create logs directory
 os.makedirs(LOG_DIR, exist_ok=True)
+print(f"Layer 1 logs will be written to: {LOG_DIR}")
 
 class DailyRotatingFileHandler(TimedRotatingFileHandler):
     """Custom handler that creates daily log files with YYYY-MM-DD.log format"""
@@ -53,14 +73,23 @@ class DailyRotatingFileHandler(TimedRotatingFileHandler):
         self.baseFilename = os.path.join(self.log_dir, f"{self.current_date}.log")
         super().doRollover()
 
+# Correlation ID filter
+class CorrelationIDFilter(logging.Filter):
+    def filter(self, record):
+        if not hasattr(record, 'correlation_id'):
+            record.correlation_id = '-'
+        return True
+
 # Configure root logger
 root_logger = logging.getLogger()
+root_logger.handlers.clear()
 root_logger.setLevel(getattr(logging, LOG_LEVEL))
 
 # Console handler (for live viewing)
 console_handler = logging.StreamHandler()
 console_format = '%(asctime)s - %(name)s - %(levelname)s - [%(correlation_id)s] - %(message)s'
 console_handler.setFormatter(logging.Formatter(console_format))
+console_handler.addFilter(CorrelationIDFilter())
 root_logger.addHandler(console_handler)
 
 # Daily rotating file handler
@@ -73,6 +102,7 @@ file_handler = DailyRotatingFileHandler(
 )
 file_format = '%(asctime)s - %(name)s - %(levelname)s - [%(correlation_id)s] - %(filename)s:%(lineno)d - %(message)s'
 file_handler.setFormatter(logging.Formatter(file_format))
+file_handler.addFilter(CorrelationIDFilter())
 root_logger.addHandler(file_handler)
 
 # Optional: Size-based rotation as fallback
@@ -83,24 +113,17 @@ size_handler = RotatingFileHandler(
 )
 size_handler.setLevel(logging.WARNING)
 size_handler.setFormatter(logging.Formatter(file_format))
+size_handler.addFilter(CorrelationIDFilter())
 root_logger.addHandler(size_handler)
-
-# Correlation ID filter
-class CorrelationIDFilter(logging.Filter):
-    def filter(self, record):
-        if not hasattr(record, 'correlation_id'):
-            record.correlation_id = '-'
-        return True
 
 # Get logger for this module
 logger = logging.getLogger("sms-layer1")
-logger.addFilter(CorrelationIDFilter())
 
 # Log startup
-logger.info("🚀 Logger initialized")
-logger.info(f"📋 Log configuration:")
+logger.info("[START] Logger initialized")
+logger.info("[CONFIG] Log configuration:")
 logger.info(f"   - Level: {LOG_LEVEL}")
-logger.info(f"   - Directory: {os.path.abspath(LOG_DIR)}")
+logger.info(f"   - Directory: {LOG_DIR}")
 logger.info(f"   - Format: YYYY-MM-DD.log")
 logger.info(f"   - Retention: {LOG_RETENTION_DAYS} days")
 
@@ -145,16 +168,16 @@ class TokenManager:
     async def initialize(self):
         """Get initial token on startup"""
         await self._get_new_token()
-        logger.info(f"✅ TokenManager initialized")
+        logger.info("[OK] TokenManager initialized")
         
     async def get_valid_token(self) -> str:
         """Get a valid token (refresh if expired)"""
         async with self.lock:
-            current_time = datetime.now().timestamp()
+            current_time = time.time()
             
             # If token expires in less than 60 seconds, refresh
-            if current_time >= self.token_expiry - 60:
-                logger.info("⏰ Token expiring soon, refreshing...")
+            if not self.access_token or current_time >= self.token_expiry - 60:
+                logger.info("[INFO] Token expiring soon, refreshing...")
                 await self._refresh_token()
                 
             return self.access_token
@@ -178,15 +201,15 @@ class TokenManager:
                     self.refresh_token = data.get('refresh')
                     
                     # JWT tokens typically expire in 5 minutes (300 seconds)
-                    self.token_expiry = datetime.now().timestamp() + 280  # Refresh 20s early
+                    self.token_expiry = time.time() + 280  # Refresh 20s early
                     
-                    logger.info(f"✅ New token obtained")
+                    logger.info("[OK] New token obtained")
                 else:
-                    logger.error(f"❌ Failed to get token: {response.status_code}")
+                    logger.error(f"[ERROR] Failed to get token: {response.status_code} - {response.text}")
                     raise Exception(f"Token acquisition failed: {response.status_code}")
                     
         except Exception as e:
-            logger.error(f"❌ Token acquisition error: {e}")
+            logger.error(f"[ERROR] Token acquisition error: {e}")
             raise
     
     async def _refresh_token(self):
@@ -203,17 +226,22 @@ class TokenManager:
                     if response.status_code == 200:
                         data = response.json()
                         self.access_token = data['access']
-                        self.token_expiry = datetime.now().timestamp() + 280
-                        logger.info(f"✅ Token refreshed successfully")
+                        self.token_expiry = time.time() + 280
+                        logger.info("[OK] Token refreshed successfully")
+                        return
                     else:
-                        logger.warning(f"⚠️ Refresh failed, getting new token")
-                        await self._get_new_token()
-                else:
-                    await self._get_new_token()
+                        logger.warning(f"[WARN] Refresh failed ({response.status_code}), getting new token")
+                
+                # Fall back to new token
+                await self._get_new_token()
                     
         except Exception as e:
-            logger.error(f"❌ Token refresh error: {e}")
-            await self._get_new_token()
+            logger.error(f"[ERROR] Token refresh error: {e}")
+            # Try to get new token as fallback
+            try:
+                await self._get_new_token()
+            except:
+                pass  # Already logged
     
     def get_auth_header(self) -> dict:
         """Get authorization header for requests"""
@@ -254,13 +282,13 @@ async def lifespan(app: FastAPI):
     
     # Generate correlation ID for startup
     correlation_id = str(uuid.uuid4())
-    logger = logging.LoggerAdapter(logger, {'correlation_id': correlation_id})
+    log = logging.LoggerAdapter(logger, {'correlation_id': correlation_id})
     
-    logger.info("🚀 Starting SMS Layer 1 Ingestion Service...")
-    logger.info(f"📋 Configuration:")
-    logger.info(f"   - Kafka: {KAFKA_BOOTSTRAP_SERVERS}")
-    logger.info(f"   - Campaign Manager: {CAMPAIGN_MANAGER_URL}")
-    logger.info(f"   - Django Auth: {DJANGO_USERNAME}")
+    log.info("[START] Starting SMS Layer 1 Ingestion Service...")
+    log.info("[CONFIG] Configuration:")
+    log.info(f"   - Kafka: {KAFKA_BOOTSTRAP_SERVERS}")
+    log.info(f"   - Campaign Manager: {CAMPAIGN_MANAGER_URL}")
+    log.info(f"   - Django Auth: {DJANGO_USERNAME}")
     
     # Initialize HTTP client
     http_client = httpx.AsyncClient(timeout=10.0)
@@ -275,10 +303,10 @@ async def lifespan(app: FastAPI):
     # Get initial token
     try:
         await token_manager.initialize()
-        logger.info(f"✅ Token manager initialized successfully")
+        log.info("[OK] Token manager initialized successfully")
     except Exception as e:
-        logger.error(f"❌ Failed to initialize token manager: {e}")
-        logger.error(f"   Make sure Django is running and credentials are correct")
+        log.error(f"[ERROR] Failed to initialize token manager: {e}")
+        log.error("   Make sure Django is running and credentials are correct")
     
     # Connect to Kafka with retries
     connected = False
@@ -291,27 +319,27 @@ async def lifespan(app: FastAPI):
                 max_request_size=1048576  # 1MB
             )
             await producer.start()
-            logger.info(f"✅ Connected to Kafka on attempt {attempt}")
+            log.info(f"[OK] Connected to Kafka on attempt {attempt}")
             connected = True
             break
         except Exception as e:
-            logger.warning(f"⚠️ Kafka not ready (Attempt {attempt}/10): {e}")
+            log.warning(f"[WARN] Kafka not ready (Attempt {attempt}/10): {e}")
             if attempt < 10:
                 await asyncio.sleep(5)
     
     if not connected:
-        logger.error("❌ Failed to connect to Kafka after 10 attempts.")
+        log.error("[ERROR] Failed to connect to Kafka after 10 attempts.")
     
     yield
     
     # Cleanup
     if producer:
         await producer.stop()
-        logger.info("✅ Kafka producer stopped")
+        log.info("[OK] Kafka producer stopped")
     if http_client:
         await http_client.aclose()
-        logger.info("✅ HTTP client closed")
-    logger.info("👋 SMS Layer 1 stopped")
+        log.info("[OK] HTTP client closed")
+    log.info("[SHUTDOWN] SMS Layer 1 stopped")
 
 app = FastAPI(
     title="SMS Layer 1 - Command Ingestion",
@@ -327,9 +355,6 @@ async def add_correlation_id(request: Request, call_next):
     correlation_id = request.headers.get("X-Correlation-ID", str(uuid.uuid4()))
     request.state.correlation_id = correlation_id
     
-    # Add to logger
-    logger = logging.LoggerAdapter(logger, {'correlation_id': correlation_id})
-    
     response = await call_next(request)
     response.headers["X-Correlation-ID"] = correlation_id
     return response
@@ -337,7 +362,7 @@ async def add_correlation_id(request: Request, call_next):
 # =============== VALIDATION FUNCTIONS ===============
 async def validate_campaign_exists(campaign_id: int, correlation_id: str) -> tuple[bool, Optional[str]]:
     """Check if campaign exists in Django with token auth"""
-    logger = logging.LoggerAdapter(logger, {'correlation_id': correlation_id})
+    log = logging.LoggerAdapter(logger, {'correlation_id': correlation_id})
     
     try:
         # Get valid token
@@ -350,32 +375,32 @@ async def validate_campaign_exists(campaign_id: int, correlation_id: str) -> tup
             "X-Correlation-ID": correlation_id
         }
         
-        logger.info(f"🔍 Checking campaign at: {url}")
+        log.info(f"[CHECK] Checking campaign at: {url}")
         
         response = await http_client.get(url, headers=headers)
         
         if response.status_code == 200:
             return True, None
         elif response.status_code == 401:
-            logger.error(f"❌ Authentication failed - token invalid")
+            log.error("[ERROR] Authentication failed - token invalid")
             # Force token refresh on next attempt
             await token_manager._refresh_token()
-            return False, f"Authentication failed"
+            return False, "Authentication failed"
         elif response.status_code == 404:
             return False, f"Campaign {campaign_id} does not exist"
         else:
             return False, f"Campaign Manager returned status {response.status_code}"
             
     except httpx.ConnectError as e:
-        logger.error(f"❌ Cannot connect to Campaign Manager at {CAMPAIGN_MANAGER_URL}")
-        return False, f"Cannot connect to Campaign Manager"
+        log.error(f"[ERROR] Cannot connect to Campaign Manager at {CAMPAIGN_MANAGER_URL}")
+        return False, "Cannot connect to Campaign Manager"
     except Exception as e:
-        logger.error(f"Error checking campaign existence: {e}")
+        log.error(f"[ERROR] Error checking campaign existence: {e}")
         return False, f"Validation error: {str(e)}"
 
 async def validate_campaign_has_content(campaign_id: int, correlation_id: str) -> tuple[bool, Optional[str]]:
     """Check if campaign has message content"""
-    logger = logging.LoggerAdapter(logger, {'correlation_id': correlation_id})
+    log = logging.LoggerAdapter(logger, {'correlation_id': correlation_id})
     
     try:
         token = await token_manager.get_valid_token()
@@ -388,7 +413,7 @@ async def validate_campaign_has_content(campaign_id: int, correlation_id: str) -
         response = await http_client.get(url, headers=headers)
         
         if response.status_code != 200:
-            return False, f"Cannot fetch message content"
+            return False, "Cannot fetch message content"
         
         data = response.json()
         content = data.get('content', {})
@@ -398,12 +423,12 @@ async def validate_campaign_has_content(campaign_id: int, correlation_id: str) -
         
         return True, None
     except Exception as e:
-        logger.error(f"Error checking campaign content: {e}")
-        return False, f"Content validation failed"
+        log.error(f"[ERROR] Error checking campaign content: {e}")
+        return False, "Content validation failed"
 
 async def validate_campaign_has_audience(campaign_id: int, correlation_id: str) -> tuple[bool, Optional[str]]:
     """Check if campaign has recipients"""
-    logger = logging.LoggerAdapter(logger, {'correlation_id': correlation_id})
+    log = logging.LoggerAdapter(logger, {'correlation_id': correlation_id})
     
     try:
         token = await token_manager.get_valid_token()
@@ -416,7 +441,7 @@ async def validate_campaign_has_audience(campaign_id: int, correlation_id: str) 
         response = await http_client.get(url, headers=headers)
         
         if response.status_code != 200:
-            return False, f"Cannot fetch audience"
+            return False, "Cannot fetch audience"
         
         data = response.json()
         valid_count = data.get('valid_count', 0)
@@ -426,16 +451,16 @@ async def validate_campaign_has_audience(campaign_id: int, correlation_id: str) 
         
         return True, None
     except Exception as e:
-        logger.error(f"Error checking campaign audience: {e}")
-        return False, f"Audience validation failed"
+        log.error(f"[ERROR] Error checking campaign audience: {e}")
+        return False, "Audience validation failed"
 
 async def validate_campaign_for_action(campaign_id: int, action: str, correlation_id: str) -> tuple[bool, Optional[str]]:
     """
     Validate campaign based on action type
     Returns: (is_valid, error_message)
     """
-    logger = logging.LoggerAdapter(logger, {'correlation_id': correlation_id})
-    logger.info(f"🔍 Validating campaign {campaign_id} for action {action}")
+    log = logging.LoggerAdapter(logger, {'correlation_id': correlation_id})
+    log.info(f"[VALIDATE] Validating campaign {campaign_id} for action {action}")
     
     # Check if campaign exists (always required)
     exists, error = await validate_campaign_exists(campaign_id, correlation_id)
@@ -457,10 +482,10 @@ async def validate_campaign_for_action(campaign_id: int, action: str, correlatio
 # =============== KAFKA PUBLISH FUNCTION ===============
 async def publish_to_kafka(cmd_type: str, campaign_id: int, correlation_id: str, user_id: int = None, reason: str = None):
     """Publish command to Kafka"""
-    logger = logging.LoggerAdapter(logger, {'correlation_id': correlation_id})
+    log = logging.LoggerAdapter(logger, {'correlation_id': correlation_id})
     
     if not producer:
-        logger.error("❌ Kafka producer not connected")
+        log.error("[ERROR] Kafka producer not connected")
         raise HTTPException(status_code=503, detail="Kafka not connected")
     
     command_id = f"cmd_{uuid.uuid4().hex[:8]}"
@@ -486,22 +511,22 @@ async def publish_to_kafka(cmd_type: str, campaign_id: int, correlation_id: str,
             key=str(campaign_id).encode(),
             value=json.dumps(message).encode()
         )
-        logger.info(f"✅ Published {cmd_type} for campaign {campaign_id} to Kafka (Command ID: {command_id})")
+        log.info(f"[KAFKA] Published {cmd_type} for campaign {campaign_id} to Kafka (Command ID: {command_id})")
         return message
     except Exception as e:
-        logger.error(f"❌ Kafka error for campaign {campaign_id}: {e}")
+        log.error(f"[ERROR] Kafka error for campaign {campaign_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to publish to Kafka")
 
 # =============== BACKGROUND TASK ===============
 async def publish_and_log(cmd_type: str, campaign_id: int, correlation_id: str, user_id: int = None, reason: str = None):
     """Background task to publish to Kafka and log"""
-    logger = logging.LoggerAdapter(logger, {'correlation_id': correlation_id})
+    log = logging.LoggerAdapter(logger, {'correlation_id': correlation_id})
     
     try:
         message = await publish_to_kafka(cmd_type, campaign_id, correlation_id, user_id, reason)
-        logger.info(f"✅ Background publish complete: {cmd_type} for campaign {campaign_id}")
+        log.info(f"[OK] Background publish complete: {cmd_type} for campaign {campaign_id}")
     except Exception as e:
-        logger.error(f"❌ Background publish failed for campaign {campaign_id}: {e}")
+        log.error(f"[ERROR] Background publish failed for campaign {campaign_id}: {e}")
         # In production, you might want to store failed commands in a dead-letter queue
 
 # =============== API ENDPOINTS ===============
@@ -513,14 +538,14 @@ async def publish_and_log(cmd_type: str, campaign_id: int, correlation_id: str, 
 async def start_campaign(command: CommandRequest, request: Request, background_tasks: BackgroundTasks):
     """Start a campaign execution."""
     correlation_id = request.state.correlation_id
-    logger = logging.LoggerAdapter(logger, {'correlation_id': correlation_id})
+    log = logging.LoggerAdapter(logger, {'correlation_id': correlation_id})
     
-    logger.info(f"📥 Received START request for campaign {command.campaign_id}")
+    log.info(f"[REQUEST] Received START request for campaign {command.campaign_id}")
     
     # Validate campaign
     is_valid, error = await validate_campaign_for_action(command.campaign_id, "START", correlation_id)
     if not is_valid:
-        logger.warning(f"❌ Validation failed: {error}")
+        log.warning(f"[ERROR] Validation failed: {error}")
         raise HTTPException(status_code=400, detail=error)
     
     command_id = f"cmd_{uuid.uuid4().hex[:8]}"
@@ -551,14 +576,14 @@ async def start_campaign(command: CommandRequest, request: Request, background_t
 async def stop_campaign(command: CommandRequest, request: Request, background_tasks: BackgroundTasks):
     """Stop a running campaign."""
     correlation_id = request.state.correlation_id
-    logger = logging.LoggerAdapter(logger, {'correlation_id': correlation_id})
+    log = logging.LoggerAdapter(logger, {'correlation_id': correlation_id})
     
-    logger.info(f"📥 Received STOP request for campaign {command.campaign_id}")
+    log.info(f"[REQUEST] Received STOP request for campaign {command.campaign_id}")
     
     # Validate campaign exists
     is_valid, error = await validate_campaign_for_action(command.campaign_id, "STOP", correlation_id)
     if not is_valid:
-        logger.warning(f"❌ Validation failed: {error}")
+        log.warning(f"[ERROR] Validation failed: {error}")
         raise HTTPException(status_code=400, detail=error)
     
     command_id = f"cmd_{uuid.uuid4().hex[:8]}"
@@ -587,13 +612,13 @@ async def stop_campaign(command: CommandRequest, request: Request, background_ta
 async def pause_campaign(command: CommandRequest, request: Request, background_tasks: BackgroundTasks):
     """Pause a campaign."""
     correlation_id = request.state.correlation_id
-    logger = logging.LoggerAdapter(logger, {'correlation_id': correlation_id})
+    log = logging.LoggerAdapter(logger, {'correlation_id': correlation_id})
     
-    logger.info(f"📥 Received PAUSE request for campaign {command.campaign_id}")
+    log.info(f"[REQUEST] Received PAUSE request for campaign {command.campaign_id}")
     
     is_valid, error = await validate_campaign_for_action(command.campaign_id, "PAUSE", correlation_id)
     if not is_valid:
-        logger.warning(f"❌ Validation failed: {error}")
+        log.warning(f"[ERROR] Validation failed: {error}")
         raise HTTPException(status_code=400, detail=error)
     
     command_id = f"cmd_{uuid.uuid4().hex[:8]}"
@@ -622,13 +647,13 @@ async def pause_campaign(command: CommandRequest, request: Request, background_t
 async def resume_campaign(command: CommandRequest, request: Request, background_tasks: BackgroundTasks):
     """Resume a paused campaign."""
     correlation_id = request.state.correlation_id
-    logger = logging.LoggerAdapter(logger, {'correlation_id': correlation_id})
+    log = logging.LoggerAdapter(logger, {'correlation_id': correlation_id})
     
-    logger.info(f"📥 Received RESUME request for campaign {command.campaign_id}")
+    log.info(f"[REQUEST] Received RESUME request for campaign {command.campaign_id}")
     
     is_valid, error = await validate_campaign_for_action(command.campaign_id, "RESUME", correlation_id)
     if not is_valid:
-        logger.warning(f"❌ Validation failed: {error}")
+        log.warning(f"[ERROR] Validation failed: {error}")
         raise HTTPException(status_code=400, detail=error)
     
     command_id = f"cmd_{uuid.uuid4().hex[:8]}"
@@ -657,13 +682,13 @@ async def resume_campaign(command: CommandRequest, request: Request, background_
 async def complete_campaign(command: CommandRequest, request: Request, background_tasks: BackgroundTasks):
     """Mark a campaign as completed."""
     correlation_id = request.state.correlation_id
-    logger = logging.LoggerAdapter(logger, {'correlation_id': correlation_id})
+    log = logging.LoggerAdapter(logger, {'correlation_id': correlation_id})
     
-    logger.info(f"📥 Received COMPLETE request for campaign {command.campaign_id}")
+    log.info(f"[REQUEST] Received COMPLETE request for campaign {command.campaign_id}")
     
     is_valid, error = await validate_campaign_for_action(command.campaign_id, "COMPLETE", correlation_id)
     if not is_valid:
-        logger.warning(f"❌ Validation failed: {error}")
+        log.warning(f"[ERROR] Validation failed: {error}")
         raise HTTPException(status_code=400, detail=error)
     
     command_id = f"cmd_{uuid.uuid4().hex[:8]}"
@@ -690,7 +715,7 @@ async def complete_campaign(command: CommandRequest, request: Request, backgroun
 async def health(request: Request):
     """Health check endpoint."""
     correlation_id = request.state.correlation_id
-    logger = logging.LoggerAdapter(logger, {'correlation_id': correlation_id})
+    log = logging.LoggerAdapter(logger, {'correlation_id': correlation_id})
     
     kafka_status = "connected" if producer else "disconnected"
     
@@ -714,7 +739,7 @@ async def health(request: Request):
         else:
             django_status = "no_token"
     except Exception as e:
-        logger.error(f"Health check error: {e}")
+        log.error(f"[ERROR] Health check error: {e}")
         django_status = "disconnected"
     
     return {
@@ -742,7 +767,7 @@ async def info():
         },
         "django_api": CAMPAIGN_MANAGER_URL,
         "logging": {
-            "directory": os.path.abspath(LOG_DIR),
+            "directory": LOG_DIR,
             "retention_days": LOG_RETENTION_DAYS,
             "format": "YYYY-MM-DD.log"
         },

@@ -1,4 +1,3 @@
-# import os
 """
 Layer 2: Campaign Execution Engine
 Consumes commands from Kafka, fetches campaign metadata from Django API,
@@ -14,16 +13,13 @@ Step-by-step flow:
 7. Publish progress to Kafka
 8. Handle backpressure, stop signals, and errors
 """
-"""
-Layer 2: Campaign Execution Engine
-Consumes commands from Kafka, fetches campaign metadata from Django API,
-streams recipients directly from PostgreSQL, builds messages, and pushes to Redis.
-"""
+
 import os
 import json
 import uuid
 import asyncio
 import logging
+import threading
 from logging.handlers import TimedRotatingFileHandler, RotatingFileHandler
 import httpx
 import asyncpg
@@ -33,17 +29,41 @@ from typing import Dict, Optional, List
 from contextlib import asynccontextmanager
 
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
+from fastapi import FastAPI
+import uvicorn
+
+# =============== DOCKER-SPECIFIC DEFAULTS ===============
+DOCKER_DEFAULTS = {
+    "KAFKA_BOOTSTRAP_SERVERS": "kafka:9092",
+    "CAMPAIGN_MANAGER_URL": "http://django-app:8000",
+    "DJANGO_USERNAME": "test",
+    "DJANGO_PASSWORD": "test",
+    "POSTGRES_DSN": "postgresql://campaign_user:campaign_pass@campaign-db:5432/campaign_db",
+    "REDIS_URL": "redis://redis:6379/0",
+    "REDIS_QUEUE_KEY": "sms:dispatch:queue",
+    "LOG_LEVEL": "INFO",
+    "LOG_DIR": "/app/logs/layer2",
+    "BATCH_SIZE": "50000",
+    "MAX_QUEUE_SIZE": "500000",
+    "HEALTH_PORT": "8003"
+}
+
+# Set defaults for any missing environment variables
+for key, value in DOCKER_DEFAULTS.items():
+    if key not in os.environ:
+        os.environ[key] = value
 
 # =============== PRODUCTION LOGGING CONFIGURATION ===============
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
-LOG_DIR = os.getenv("LOG_DIR", "logs/layer2")
+LOG_DIR = os.getenv("LOG_DIR", "/app/logs/layer2")
 LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "7"))
 LOG_WHEN = os.getenv("LOG_WHEN", "midnight")
 LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(100 * 1024 * 1024)))  # 100MB fallback
+HEALTH_PORT = int(os.getenv("HEALTH_PORT", "8003"))
 
 # Create logs directory
 os.makedirs(LOG_DIR, exist_ok=True)
-print(f"📝 Layer 2 logs will be written to: {os.path.abspath(LOG_DIR)}")
+print(f"Layer 2 logs will be written to: {LOG_DIR}")
 
 class DailyRotatingFileHandler(TimedRotatingFileHandler):
     """Custom handler that creates daily log files with YYYY-MM-DD.log format"""
@@ -119,29 +139,52 @@ root_logger.addHandler(size_handler)
 logger = logging.getLogger("layer2")
 
 # Log startup
-logger.info("🚀 Layer 2 Logger initialized")
-logger.info(f"📋 Log configuration:")
+logger.info("[START] Layer 2 Logger initialized")
+logger.info("[CONFIG] Log configuration:")
 logger.info(f"   - Level: {LOG_LEVEL}")
-logger.info(f"   - Directory: {os.path.abspath(LOG_DIR)}")
+logger.info(f"   - Directory: {LOG_DIR}")
 logger.info(f"   - Format: YYYY-MM-DD.log")
 logger.info(f"   - Retention: {LOG_RETENTION_DAYS} days")
+logger.info(f"   - Health Port: {HEALTH_PORT}")
+
+# =============== HEALTH CHECK SERVER ===============
+health_app = FastAPI()
+
+@health_app.get("/health")
+async def health():
+    """Health check endpoint for Docker"""
+    return {
+        "status": "healthy",
+        "service": "layer2",
+        "timestamp": datetime.utcnow().isoformat(),
+        "kafka_connected": consumer is not None if 'consumer' in globals() else False
+    }
+
+@health_app.get("/ready")
+async def ready():
+    """Readiness check endpoint"""
+    return {"status": "ready"}
+
+def run_health_server():
+    """Run health check server in a separate thread"""
+    uvicorn.run(health_app, host="0.0.0.0", port=HEALTH_PORT, log_level="error")
 
 # =============== CONFIGURATION ===============
-KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
 COMMAND_TOPIC = os.getenv("KAFKA_COMMAND_TOPIC", "sms-commands")
 PROGRESS_TOPIC = os.getenv("KAFKA_PROGRESS_TOPIC", "sms-batch-started")
 CONSUMER_GROUP = os.getenv("KAFKA_CONSUMER_GROUP", "layer2-engine")
 
 # Django API
-DJANGO_API_URL = os.getenv("CAMPAIGN_MANAGER_URL", "http://localhost:8000")
+DJANGO_API_URL = os.getenv("CAMPAIGN_MANAGER_URL", "http://django-app:8000")
 DJANGO_USERNAME = os.getenv("DJANGO_USERNAME", "test")
 DJANGO_PASSWORD = os.getenv("DJANGO_PASSWORD", "test")
 
 # PostgreSQL (direct connection for audience streaming)
-POSTGRES_DSN = os.getenv("POSTGRES_DSN", "postgresql://campaign_user:campaign_pass@localhost:5432/campaign_db")
+POSTGRES_DSN = os.getenv("POSTGRES_DSN", "postgresql://campaign_user:campaign_pass@campaign-db:5432/campaign_db")
 
 # Redis
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 REDIS_QUEUE_KEY = os.getenv("REDIS_QUEUE_KEY", "sms:dispatch:queue")
 MAX_QUEUE_SIZE = int(os.getenv("MAX_QUEUE_SIZE", "500000"))  # Backpressure threshold
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "50000"))  # Recipients per batch
@@ -165,7 +208,7 @@ class TokenManager:
             current_time = datetime.now().timestamp()
             
             if not self.access_token or current_time >= self.token_expiry - 60:
-                logger.info("⏰ Token expiring soon, refreshing...")
+                logger.info("[INFO] Token expiring soon, refreshing...")
                 await self._refresh_token()
                 
             return self.access_token
@@ -185,11 +228,11 @@ class TokenManager:
                         data = response.json()
                         self.access_token = data['access']
                         self.token_expiry = datetime.now().timestamp() + 280  # 5 min - 20s
-                        logger.info("✅ Token refreshed successfully")
+                        logger.info("[OK] Token refreshed successfully")
                         return
                 
                 # Get new token
-                logger.info("🔄 Getting new token from Django")
+                logger.info("[INFO] Getting new token from Django")
                 response = await client.post(
                     f"{self.api_url}/api/token/",
                     json={"username": self.username, "password": self.password},
@@ -200,12 +243,12 @@ class TokenManager:
                     self.access_token = data['access']
                     self.refresh_token = data.get('refresh')
                     self.token_expiry = datetime.now().timestamp() + 280
-                    logger.info("✅ New token acquired")
+                    logger.info("[OK] New token acquired")
                 else:
                     raise Exception(f"Token acquisition failed: {response.status_code}")
                     
         except Exception as e:
-            logger.error(f"❌ Token refresh error: {e}")
+            logger.error(f"[ERROR] Token refresh error: {e}")
             raise
 
 # =============== CAMPAIGN METADATA ===============
@@ -252,11 +295,11 @@ class CommandHandler:
         """Handle START command"""
         # Create log with correlation ID
         log = logging.LoggerAdapter(logger, {'correlation_id': correlation_id})
-        log.info(f"▶️ Handling START for campaign {campaign_id}")
+        log.info(f"[START] Handling START for campaign {campaign_id}")
         
         # Check if already running
         if campaign_id in self.running_campaigns:
-            log.warning(f"⚠️ Campaign {campaign_id} already running")
+            log.warning(f"[WARN] Campaign {campaign_id} already running")
             return
         
         # Create processing task
@@ -266,36 +309,36 @@ class CommandHandler:
         self.running_campaigns[campaign_id] = task
         self.campaign_status[campaign_id] = "RUNNING"
         
-        log.info(f"✅ Started processing campaign {campaign_id}")
+        log.info(f"[OK] Started processing campaign {campaign_id}")
     
     async def handle_stop(self, campaign_id: int, correlation_id: str):
         """Handle STOP command"""
         log = logging.LoggerAdapter(logger, {'correlation_id': correlation_id})
-        log.info(f"🛑 Handling STOP for campaign {campaign_id}")
+        log.info(f"[STOP] Handling STOP for campaign {campaign_id}")
         
         self.campaign_status[campaign_id] = "STOPPED"
         
         if campaign_id in self.running_campaigns:
-            log.info(f"⏹️ Stop signal sent to campaign {campaign_id}")
+            log.info(f"[STOP] Stop signal sent to campaign {campaign_id}")
     
     async def handle_pause(self, campaign_id: int, correlation_id: str):
         """Handle PAUSE command"""
         log = logging.LoggerAdapter(logger, {'correlation_id': correlation_id})
-        log.info(f"⏸️ Handling PAUSE for campaign {campaign_id}")
+        log.info(f"[PAUSE] Handling PAUSE for campaign {campaign_id}")
         
         self.campaign_status[campaign_id] = "PAUSED"
-        log.info(f"✅ Paused campaign {campaign_id}")
+        log.info(f"[OK] Paused campaign {campaign_id}")
     
     async def handle_resume(self, campaign_id: int, correlation_id: str):
         """Handle RESUME command"""
         log = logging.LoggerAdapter(logger, {'correlation_id': correlation_id})
-        log.info(f"▶️ Handling RESUME for campaign {campaign_id}")
+        log.info(f"[RESUME] Handling RESUME for campaign {campaign_id}")
         
         if campaign_id in self.campaign_status:
             self.campaign_status[campaign_id] = "RUNNING"
-            log.info(f"✅ Resumed campaign {campaign_id}")
+            log.info(f"[OK] Resumed campaign {campaign_id}")
         else:
-            log.warning(f"⚠️ Campaign {campaign_id} not found for resume")
+            log.warning(f"[WARN] Campaign {campaign_id} not found for resume")
 
 # =============== KAFKA CONSUMER ===============
 class KafkaCommandConsumer:
@@ -305,6 +348,7 @@ class KafkaCommandConsumer:
         self.command_handler = command_handler
         self.consumer = None
         self.running = True
+        self.connected = False
         
     async def start(self):
         """Start consuming commands"""
@@ -318,7 +362,8 @@ class KafkaCommandConsumer:
         )
         
         await self.consumer.start()
-        logger.info(f"✅ Kafka consumer started on topic {COMMAND_TOPIC}")
+        self.connected = True
+        logger.info(f"[OK] Kafka consumer started on topic {COMMAND_TOPIC}")
         
         asyncio.create_task(self._consume_loop())
     
@@ -332,7 +377,7 @@ class KafkaCommandConsumer:
                 # Create log with correlation ID
                 log = logging.LoggerAdapter(logger, {'correlation_id': correlation_id})
                 
-                log.info(f"📨 Received command: {command.get('command_type')} for campaign {command.get('campaign_id')}")
+                log.info(f"[RECV] Received command: {command.get('command_type')} for campaign {command.get('campaign_id')}")
                 log.debug(f"Command details: {command}")
                 
                 # Handle command
@@ -352,16 +397,17 @@ class KafkaCommandConsumer:
                 elif cmd_type == 'RESUME':
                     await self.command_handler.handle_resume(campaign_id, correlation_id)
                 else:
-                    log.warning(f"⚠️ Unknown command type: {cmd_type}")
+                    log.warning(f"[WARN] Unknown command type: {cmd_type}")
                 
                 # Commit offset
                 await self.consumer.commit()
-                log.debug(f"✅ Committed offset for campaign {campaign_id}")
+                log.debug(f"[OK] Committed offset for campaign {campaign_id}")
                 
         except Exception as e:
-            logger.error(f"❌ Consumer error: {e}", exc_info=True)
+            logger.error(f"[ERROR] Consumer error: {e}", exc_info=True)
         finally:
             await self.consumer.stop()
+            self.connected = False
 
 # =============== MAIN PROCESSING FUNCTION ===============
 async def process_campaign(campaign_id: int, correlation_id: str, batch_size: int):
@@ -375,7 +421,7 @@ async def process_campaign(campaign_id: int, correlation_id: str, batch_size: in
     """
     # Create log with correlation ID
     log = logging.LoggerAdapter(logger, {'correlation_id': correlation_id})
-    log.info(f"🚀 Starting campaign {campaign_id} processing")
+    log.info(f"[START] Starting campaign {campaign_id} processing")
     
     # Initialize connections
     token_manager = TokenManager(DJANGO_API_URL, DJANGO_USERNAME, DJANGO_PASSWORD)
@@ -389,16 +435,19 @@ async def process_campaign(campaign_id: int, correlation_id: str, batch_size: in
     )
     await kafka_producer.start()
     
+    # Global command_handler reference
+    global command_handler
+    
     try:
         # STEP 1: Get campaign metadata from Django API
-        log.info("📡 Fetching campaign metadata from Django API")
+        log.info("[INFO] Fetching campaign metadata from Django API")
         metadata = await fetch_campaign_metadata(campaign_id, token_manager, log)
         
         if not metadata:
-            log.error("❌ Failed to fetch campaign metadata")
+            log.error("[ERROR] Failed to fetch campaign metadata")
             return
         
-        log.info(f"📊 Campaign: {metadata.name}")
+        log.info(f"[DATA] Campaign: {metadata.name}")
         log.info(f"   - Total recipients: {metadata.total_recipients}")
         log.info(f"   - Valid recipients: {metadata.valid_recipients}")
         log.info(f"   - Templates: {list(metadata.templates.keys())}")
@@ -407,9 +456,9 @@ async def process_campaign(campaign_id: int, correlation_id: str, batch_size: in
         # STEP 2: Get starting point from checkpoint
         last_id = metadata.last_processed
         if metadata.has_checkpoint:
-            log.info(f"📌 Resuming from checkpoint ID: {last_id}")
+            log.info(f"[RESUME] Resuming from checkpoint ID: {last_id}")
         else:
-            log.info(f"📌 Starting from beginning (ID: 0)")
+            log.info(f"[START] Starting from beginning (ID: 0)")
         
         batch_num = 0
         total_processed = 0
@@ -418,15 +467,15 @@ async def process_campaign(campaign_id: int, correlation_id: str, batch_size: in
         # STEP 3: Main processing loop
         while True:
             # Check if we should stop/pause
-            current_status = command_handler.campaign_status.get(campaign_id)
+            current_status = command_handler.campaign_status.get(campaign_id, "RUNNING")
             if current_status != "RUNNING":
-                log.info(f"⏸️ Campaign {campaign_id} status changed to {current_status}")
+                log.info(f"[PAUSE] Campaign {campaign_id} status changed to {current_status}")
                 break
             
             # STEP 4: Backpressure check
             queue_size = await redis_client.llen(REDIS_QUEUE_KEY)
             if queue_size > MAX_QUEUE_SIZE:
-                log.info(f"⏳ Backpressure: queue size {queue_size} > {MAX_QUEUE_SIZE}, waiting 2s")
+                log.info(f"[BACKPRESSURE] queue size {queue_size} > {MAX_QUEUE_SIZE}, waiting 2s")
                 await asyncio.sleep(2)
                 continue
             
@@ -435,14 +484,14 @@ async def process_campaign(campaign_id: int, correlation_id: str, batch_size: in
             batch = await fetch_recipient_batch(pg_pool, campaign_id, last_id, batch_size, log)
             
             if not batch:
-                log.info(f"✅ No more recipients for campaign {campaign_id}")
+                log.info(f"[DONE] No more recipients for campaign {campaign_id}")
                 break
             
-            log.info(f"📦 Fetched batch {batch_num+1}: {len(batch)} recipients (IDs {batch[0]['id']} - {batch[-1]['id']})")
+            log.info(f"[BATCH] Fetched batch {batch_num+1}: {len(batch)} recipients (IDs {batch[0]['id']} - {batch[-1]['id']})")
             
             # STEP 6: Build messages
             messages = build_messages(batch, metadata, campaign_id, log)
-            log.info(f"🔨 Built {len(messages)} messages")
+            log.info(f"[BUILD] Built {len(messages)} messages")
             
             # STEP 7: Push to Redis using pipeline
             await push_to_redis(redis_client, messages, log)
@@ -461,26 +510,27 @@ async def process_campaign(campaign_id: int, correlation_id: str, batch_size: in
             elapsed = (datetime.now() - start_time).total_seconds()
             rate = total_processed / elapsed if elapsed > 0 else 0
             
-            log.info(f"✅ Batch {batch_num} complete: {len(messages)} messages")
-            log.info(f"📊 Progress: {total_processed}/{metadata.total_recipients} ({total_processed/metadata.total_recipients*100:.1f}%)")
-            log.info(f"⚡ Rate: {rate:.0f} msgs/sec")
+            log.info(f"[BATCH] Batch {batch_num} complete: {len(messages)} messages")
+            log.info(f"[PROGRESS] Progress: {total_processed}/{metadata.total_recipients} ({total_processed/metadata.total_recipients*100:.1f}%)")
+            log.info(f"[RATE] Rate: {rate:.0f} msgs/sec")
         
         # STEP 10: Campaign complete
         elapsed = (datetime.now() - start_time).total_seconds()
-        log.info(f"🎉 Campaign {campaign_id} completed!")
-        log.info(f"📊 Final stats: {total_processed} messages in {elapsed:.0f} seconds ({total_processed/elapsed:.0f} msgs/sec)")
+        log.info(f"[COMPLETE] Campaign {campaign_id} completed!")
+        log.info(f"[STATS] Final stats: {total_processed} messages in {elapsed:.0f} seconds ({total_processed/elapsed:.0f} msgs/sec)")
         
         await mark_campaign_complete(campaign_id, token_manager, log)
         
     except Exception as e:
-        log.error(f"❌ Error processing campaign {campaign_id}: {e}", exc_info=True)
+        log.error(f"[ERROR] Error processing campaign {campaign_id}: {e}", exc_info=True)
     finally:
         # Cleanup
         await pg_pool.close()
         await redis_client.close()
         await kafka_producer.stop()
-        command_handler.running_campaigns.pop(campaign_id, None)
-        log.info(f"👋 Campaign {campaign_id} processing finished")
+        if campaign_id in command_handler.running_campaigns:
+            command_handler.running_campaigns.pop(campaign_id, None)
+        log.info(f"[SHUTDOWN] Campaign {campaign_id} processing finished")
 
 # =============== HELPER FUNCTIONS ===============
 async def fetch_campaign_metadata(campaign_id: int, token_manager: TokenManager, log) -> Optional[CampaignMetadata]:
@@ -503,10 +553,10 @@ async def fetch_campaign_metadata(campaign_id: int, token_manager: TokenManager,
                 log.debug(f"Received metadata: {data.get('name')}")
                 return CampaignMetadata(data)
             else:
-                log.error(f"❌ Django API returned {response.status_code}: {response.text}")
+                log.error(f"[ERROR] Django API returned {response.status_code}: {response.text}")
                 return None
     except Exception as e:
-        log.error(f"❌ Error fetching campaign metadata: {e}")
+        log.error(f"[ERROR] Error fetching campaign metadata: {e}")
         return None
 
 async def fetch_recipient_batch(pool, campaign_id: int, last_id: int, limit: int, log) -> List[dict]:
@@ -530,7 +580,7 @@ async def fetch_recipient_batch(pool, campaign_id: int, last_id: int, limit: int
             
             return [dict(row) for row in rows]
     except Exception as e:
-        log.error(f"❌ Error fetching recipients: {e}")
+        log.error(f"[ERROR] Error fetching recipients: {e}")
         return []
 
 def build_messages(recipients: List[dict], metadata: CampaignMetadata, campaign_id: int, log) -> List[dict]:
@@ -577,9 +627,9 @@ async def push_to_redis(redis_client, messages: List[dict], log):
             await pipe.execute()
         
         elapsed = (datetime.now() - start).total_seconds() * 1000
-        log.info(f"📤 Pushed {len(messages)} messages to Redis in {elapsed:.0f}ms")
+        log.info(f"[REDIS] Pushed {len(messages)} messages to Redis in {elapsed:.0f}ms")
     except Exception as e:
-        log.error(f"❌ Redis push error: {e}")
+        log.error(f"[ERROR] Redis push error: {e}")
         raise
 
 async def update_checkpoint(pool, campaign_id: int, last_id: int, batch_size: int, log):
@@ -598,9 +648,9 @@ async def update_checkpoint(pool, campaign_id: int, last_id: int, batch_size: in
             """, campaign_id, last_id, batch_size)
         
         elapsed = (datetime.now() - start).total_seconds() * 1000
-        log.debug(f"💾 Checkpoint updated: last_id={last_id} ({elapsed:.0f}ms)")
+        log.debug(f"[CHECKPOINT] Updated: last_id={last_id} ({elapsed:.0f}ms)")
     except Exception as e:
-        log.error(f"❌ Checkpoint update error: {e}")
+        log.error(f"[ERROR] Checkpoint update error: {e}")
 
 async def publish_progress(producer, campaign_id: int, batch_num: int, messages: List[dict], correlation_id: str, log):
     """Publish batch progress to Kafka"""
@@ -619,9 +669,9 @@ async def publish_progress(producer, campaign_id: int, batch_num: int, messages:
         }
         
         await producer.send(PROGRESS_TOPIC, event)
-        log.debug(f"📨 Published batch {batch_num} progress to Kafka")
+        log.debug(f"[KAFKA] Published batch {batch_num} progress to Kafka")
     except Exception as e:
-        log.error(f"❌ Kafka publish error: {e}")
+        log.error(f"[ERROR] Kafka publish error: {e}")
 
 async def mark_campaign_complete(campaign_id: int, token_manager: TokenManager, log):
     """Mark campaign as complete in Django"""
@@ -638,51 +688,60 @@ async def mark_campaign_complete(campaign_id: int, token_manager: TokenManager, 
             )
             
             if response.status_code == 202:
-                log.info(f"✅ Campaign {campaign_id} marked as complete")
+                log.info(f"[OK] Campaign {campaign_id} marked as complete")
             else:
-                log.warning(f"⚠️ Django returned {response.status_code} for complete")
+                log.warning(f"[WARN] Django returned {response.status_code} for complete")
     except Exception as e:
-        log.error(f"❌ Error marking campaign complete: {e}")
+        log.error(f"[ERROR] Error marking campaign complete: {e}")
 
 # =============== MAIN ===============
+# Global command handler instance
+command_handler = None
+consumer = None
+
 async def main():
     """Main entry point"""
     logger.info("=" * 60)
-    logger.info("🚀 Starting Layer 2: Campaign Execution Engine")
+    logger.info("[START] Starting Layer 2: Campaign Execution Engine")
     logger.info("=" * 60)
-    logger.info(f"📋 Configuration:")
+    logger.info(f"[CONFIG] Configuration:")
     logger.info(f"   - Kafka: {KAFKA_BOOTSTRAP_SERVERS}")
     logger.info(f"   - Command Topic: {COMMAND_TOPIC}")
     logger.info(f"   - Progress Topic: {PROGRESS_TOPIC}")
     logger.info(f"   - Django API: {DJANGO_API_URL}")
-    logger.info(f"   - PostgreSQL: {POSTGRES_DSN.split('@')[1] if '@' in POSTGRES_DSN else 'configured'}")
+    logger.info(f"   - PostgreSQL: {POSTGRES_DSN}")
     logger.info(f"   - Redis: {REDIS_URL}")
     logger.info(f"   - Batch Size: {BATCH_SIZE}")
     logger.info(f"   - Max Queue Size: {MAX_QUEUE_SIZE}")
-    logger.info(f"   - Log Directory: {os.path.abspath(LOG_DIR)}")
+    logger.info(f"   - Log Directory: {LOG_DIR}")
+    logger.info(f"   - Health Port: {HEALTH_PORT}")
     logger.info("=" * 60)
     
-    global command_handler
-    command_handler = CommandHandler()
+    # Start health check server in background thread
+    health_thread = threading.Thread(target=run_health_server, daemon=True)
+    health_thread.start()
+    logger.info(f"[OK] Health check server started on port {HEALTH_PORT}")
     
+    global command_handler, consumer
+    command_handler = CommandHandler()
     consumer = KafkaCommandConsumer(command_handler)
     
     try:
         await consumer.start()
         
         # Keep running
-        logger.info("✅ Layer 2 is running. Press Ctrl+C to stop.")
+        logger.info("[OK] Layer 2 is running. Press Ctrl+C to stop.")
         while True:
             await asyncio.sleep(1)
             
     except KeyboardInterrupt:
-        logger.info("👋 Shutdown signal received")
+        logger.info("[SHUTDOWN] Shutdown signal received")
     except Exception as e:
-        logger.error(f"❌ Fatal error: {e}", exc_info=True)
+        logger.error(f"[ERROR] Fatal error: {e}", exc_info=True)
     finally:
-        if consumer.consumer:
+        if consumer and consumer.consumer:
             await consumer.consumer.stop()
-        logger.info("👋 Layer 2 stopped")
+        logger.info("[SHUTDOWN] Layer 2 stopped")
 
 if __name__ == "__main__":
     asyncio.run(main())

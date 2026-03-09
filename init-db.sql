@@ -8,4 +8,3 @@ CREATE DATABASE campaign_db OWNER campaign_user;
 -- Grant privileges
 GRANT ALL PRIVILEGES ON DATABASE airflow TO airflow;
 GRANT ALL PRIVILEGES ON DATABASE campaign_db TO campaign_user;
-EOF
