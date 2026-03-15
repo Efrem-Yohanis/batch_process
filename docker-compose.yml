@@ -278,7 +278,7 @@ services:
     container_name: sms-layer2
     restart: unless-stopped
     ports:
-      - "8003:8003"  # Health check port
+      - "8005:8003"  # Health check port
     environment:
       - SERVICE_NAME=layer2
       - LOG_LEVEL=INFO
@@ -348,8 +348,8 @@ services:
       - RETRY_DELAY_1=60
       - RETRY_DELAY_2=300
       - RETRY_DELAY_3=900
-      - API_URL=https://api.your-sms-provider.com/v1/send
-      - API_KEY=your-actual-api-key-here
+      - API_URL=http://mock-sms-provider:8003/api/send
+      - API_KEY=mock-provider-no-auth-needed
       - API_TIMEOUT=5
       - DJANGO_URL=http://django-app:8000
       - DJANGO_USERNAME=test
@@ -413,6 +413,29 @@ services:
     logging: *default-logging
     networks:
       - scheduler-network
+
+  # =============== MOCK SMS PROVIDER ===============
+  # =============== MOCK SMS PROVIDER ===============
+  mock-sms-provider:
+    build: ./mock-sms-provider
+    container_name: mock-sms-provider
+    restart: unless-stopped
+    ports:
+      - "8004:8003"  # Host port 8004 maps to container port 8003
+    environment:
+      - MOCK_SUCCESS_RATE=0.98
+      - MOCK_RESPONSE_DELAY_MS=50
+      - MOCK_RANDOM_FAILURES=true
+      - MOCK_API_PORT=8003
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - scheduler-network
+
 
 networks:
   scheduler-network:

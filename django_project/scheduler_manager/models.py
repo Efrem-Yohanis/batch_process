@@ -31,6 +31,13 @@ class Campaign(models.Model):
         ('archived', 'Archived'),
     ]
     
+    # Channel choices - can select multiple
+    CHANNEL_CHOICES = [
+        ('sms', 'SMS'),
+        ('app_notification', 'App Notification'),
+        ('flash_sms', 'Flash SMS'),
+    ]
+    
     name = models.CharField(max_length=255)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='draft')
     created_by = models.ForeignKey('auth.User', on_delete=models.SET_NULL, null=True, blank=True)
@@ -40,16 +47,69 @@ class Campaign(models.Model):
     # Soft delete fields
     is_deleted = models.BooleanField(default=False)
     deleted_at = models.DateTimeField(null=True, blank=True)
+    
+    # Sender ID for this campaign (each campaign can have its own sender ID)
+    sender_id = models.CharField(
+        max_length=11,  # SMS sender IDs are typically 3-11 characters
+        blank=True,
+        null=True,
+        help_text="Sender ID that will appear as the message sender (e.g., 'SMSINFO', 'MPESA')"
+    )
+    
+    # Multiple channels support
+    channels = models.JSONField(
+        default=list,
+        help_text="List of channels for this campaign. Options: sms, app_notification, flash_sms"
+    )
 
     def __str__(self):
-        return f"{self.name} (ID: {self.id})"
+        channels_display = ', '.join(self.get_channels_display())
+        return f"{self.name} (ID: {self.id}) - Channels: {channels_display}"
 
     class Meta:
         ordering = ['-created_at']
         indexes = [
             models.Index(fields=['status']),
             models.Index(fields=['created_by']),
+            models.Index(fields=['sender_id']),  # Added index for sender_id
         ]
+
+    def clean(self):
+        """Validate sender ID and channels"""
+        super().clean()
+        
+        # Validate sender ID
+        if self.sender_id:
+            if len(self.sender_id) < 3 or len(self.sender_id) > 11:
+                raise ValidationError({
+                    'sender_id': 'Sender ID must be between 3 and 11 characters'
+                })
+            if not self.sender_id.replace('_', '').isalnum():
+                raise ValidationError({
+                    'sender_id': 'Sender ID can only contain letters, numbers, and underscores'
+                })
+        
+        # Validate channels
+        if not self.channels:
+            raise ValidationError({
+                'channels': 'At least one channel must be selected'
+            })
+        
+        valid_channels = [choice[0] for choice in self.CHANNEL_CHOICES]
+        for channel in self.channels:
+            if channel not in valid_channels:
+                raise ValidationError({
+                    'channels': f"Invalid channel: {channel}. Valid options are: {valid_channels}"
+                })
+
+    def get_channels_display(self):
+        """Return human-readable channel names"""
+        channel_map = dict(self.CHANNEL_CHOICES)
+        return [channel_map.get(ch, ch) for ch in self.channels]
+
+    def has_channel(self, channel):
+        """Check if campaign has a specific channel"""
+        return channel in self.channels
 
     def can_start(self):
         """Check if campaign can be started"""
@@ -58,7 +118,9 @@ class Campaign(models.Model):
             hasattr(self, 'schedule') and
             hasattr(self, 'message_content') and
             hasattr(self, 'audience') and
-            self.audience.recipients
+            self.audience.recipients and
+            self.sender_id and  # Added sender_id validation
+            self.channels  # Ensure channels are selected
         )
     
     def can_pause(self):
@@ -462,6 +524,18 @@ class MessageStatus(models.Model):
     campaign_id = models.IntegerField(db_index=True)
     batch_id = models.CharField(max_length=50, db_index=True)
     phone_number = models.CharField(max_length=20, db_index=True)
+    sender_id = models.CharField(
+        max_length=11, 
+        blank=True, 
+        null=True,
+        help_text="Sender ID used for this message"
+    )
+    channel = models.CharField(
+        max_length=20,
+        choices=Campaign.CHANNEL_CHOICES,
+        default='sms',
+        help_text="Channel used for this message (sms, app_notification, flash_sms)"
+    )
     status = models.CharField(
         max_length=20, 
         choices=MESSAGE_STATUS_CHOICES,
@@ -481,11 +555,13 @@ class MessageStatus(models.Model):
             models.Index(fields=['created_at']),  # For time-based queries
             models.Index(fields=['status', 'last_attempt']),  # For retry logic
             models.Index(fields=['phone_number', 'campaign_id']),  # For recipient lookup
+            models.Index(fields=['sender_id']),
+            models.Index(fields=['channel']),  # Added index for channel
         ]
         verbose_name_plural = "Message Statuses"
 
     def __str__(self):
-        return f"Message {self.message_id} - {self.status}"
+        return f"Message {self.message_id} - {self.status} (Channel: {self.channel}, Sender: {self.sender_id})"
 
     def save(self, *args, **kwargs):
         is_new = not self.pk
@@ -493,7 +569,7 @@ class MessageStatus(models.Model):
         
         # Log important status changes
         if is_new:
-            logger.debug(f"New message created: {self.message_id}")
+            logger.debug(f"New message created: {self.message_id} via {self.channel} with sender {self.sender_id}")
         elif self.status in ['FAILED', 'DELIVERED']:
             logger.info(f"Message {self.message_id} status: {self.status}")
 
@@ -596,14 +672,6 @@ def update_batch_and_progress(sender, instance, created, **kwargs):
 from django.db.models import Model
 from django.utils.functional import cached_property
 
-class MessageStatus(models.Model):
-    # ... (existing fields) ...
-    
-    @cached_property
-    def tracker(self):
-        return ModelTracker(self)
-
-
 class ModelTracker:
     """Simple model field change tracker"""
     def __init__(self, instance):
@@ -618,3 +686,12 @@ class ModelTracker:
     
     def has_changed(self, field):
         return self._initial.get(field) != getattr(self.instance, field)
+
+
+# Add tracker property to MessageStatus
+@property
+def message_status_tracker(self):
+    return ModelTracker(self)
+
+# Attach the tracker to MessageStatus
+MessageStatus.tracker = message_status_tracker

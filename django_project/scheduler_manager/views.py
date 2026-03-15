@@ -1,13 +1,15 @@
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, AllowAny
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.db import transaction
 from django.contrib.auth.models import User
 from rest_framework import generics, permissions
-from .serializers import UserSerializer
+from .serializers import (
+    UserSerializer, ChannelChoiceSerializer, CampaignActionSerializer
+)
 from django.core.exceptions import ValidationError
 import logging
 
@@ -19,7 +21,7 @@ from .serializers import (
     CampaignSerializer, ScheduleSerializer, MessageContentSerializer, AudienceSerializer,
     CampaignScheduleSerializer, CampaignMessageContentSerializer, CampaignAudienceSerializer,
     CampaignProgressSerializer, BatchStatusSerializer, MessageStatusSerializer,
-    MessageStatusBulkCreateSerializer, CheckpointSerializer, CampaignActionSerializer
+    MessageStatusBulkCreateSerializer, CheckpointSerializer
 )
 
 logger = logging.getLogger(__name__)
@@ -33,13 +35,14 @@ class CampaignViewSet(viewsets.ModelViewSet):
     - Managing schedule, message content, and audience
     - Starting, stopping, and completing campaigns
     - Viewing campaign progress and statistics
+    - Channel management
     """
     
     queryset = Campaign.objects.all().select_related(
         'schedule', 'message_content', 'audience', 'progress', 'checkpoint'
     )
     serializer_class = CampaignSerializer
-    
+    permission_classes = [IsAuthenticated]
     
     def get_queryset(self):
         """Filter queryset based on user and query parameters"""
@@ -49,6 +52,16 @@ class CampaignViewSet(viewsets.ModelViewSet):
         status = self.request.query_params.get('status')
         if status:
             queryset = queryset.filter(status=status)
+        
+        # Filter by channel if provided
+        channel = self.request.query_params.get('channel')
+        if channel:
+            queryset = queryset.filter(channels__contains=[channel])
+        
+        # Filter by sender_id if provided
+        sender_id = self.request.query_params.get('sender_id')
+        if sender_id:
+            queryset = queryset.filter(sender_id=sender_id)
         
         # Filter by date range if provided
         created_after = self.request.query_params.get('created_after')
@@ -69,6 +82,14 @@ class CampaignViewSet(viewsets.ModelViewSet):
         """Set the creator when creating a campaign"""
         serializer.save(created_by=self.request.user)
         logger.info(f"Campaign created by user {self.request.user.id}")
+
+    @action(detail=False, methods=['get'], url_path='channel-choices')
+    def channel_choices(self, request):
+        """
+        Get available channel choices for campaigns.
+        Useful for frontend dropdowns.
+        """
+        return Response(ChannelChoiceSerializer.get_choices())
 
     @action(detail=True, methods=['get', 'patch', 'put'], url_path='message-content')
     def message_content_detail(self, request, pk=None):
@@ -321,6 +342,7 @@ class CampaignViewSet(viewsets.ModelViewSet):
         Start a campaign.
         
         Validates that all required components are present and campaign is in draft state.
+        Includes validation for sender_id and channels.
         """
         campaign = self.get_object()
         
@@ -329,6 +351,14 @@ class CampaignViewSet(viewsets.ModelViewSet):
         
         if campaign.status != 'draft':
             errors.append(f"Campaign must be in 'draft' status to start (current: {campaign.status})")
+        
+        # Validate sender_id
+        if not campaign.sender_id:
+            errors.append("Sender ID is required")
+        
+        # Validate channels
+        if not campaign.channels:
+            errors.append("At least one channel must be selected")
         
         if not hasattr(campaign, 'schedule'):
             errors.append("Schedule is required")
@@ -384,7 +414,9 @@ class CampaignViewSet(viewsets.ModelViewSet):
             "message": "Campaign is now active and running",
             "campaign_id": campaign.id,
             "total_recipients": campaign.audience.total_count,
-            "valid_recipients": campaign.audience.valid_count
+            "valid_recipients": campaign.audience.valid_count,
+            "sender_id": campaign.sender_id,
+            "channels": campaign.channels
         })
 
     @action(detail=True, methods=['post'])
@@ -547,6 +579,8 @@ class CampaignViewSet(viewsets.ModelViewSet):
             'campaign_name': campaign.name,
             'progress': CampaignProgressSerializer(progress).data,
             'batches': batch_summary,
+            'channels': campaign.channels,
+            'sender_id': campaign.sender_id
         }
         
         return Response(data)
@@ -605,14 +639,24 @@ class CampaignViewSet(viewsets.ModelViewSet):
         summary = {
             'total': campaigns.count(),
             'by_status': {},
+            'by_channel': {},
             'total_recipients': 0,
             'total_sent': 0,
         }
         
+        # Count by status
         for status_choice, _ in Campaign.STATUS_CHOICES:
             count = campaigns.filter(status=status_choice).count()
             if count > 0:
                 summary['by_status'][status_choice] = count
+        
+        # Count by channel (simplified - campaigns can have multiple channels)
+        channel_counts = {'sms': 0, 'app_notification': 0, 'flash_sms': 0}
+        for campaign in campaigns:
+            for channel in campaign.channels:
+                if channel in channel_counts:
+                    channel_counts[channel] += 1
+        summary['by_channel'] = channel_counts
         
         # Aggregate progress data
         from django.db.models import Sum
@@ -639,7 +683,7 @@ class ScheduleViewSet(viewsets.ReadOnlyModelViewSet):
     
     queryset = Schedule.objects.all().select_related('campaign')
     serializer_class = ScheduleSerializer
-    
+    permission_classes = [IsAuthenticated]
     
     def get_queryset(self):
         """Filter queryset based on query parameters"""
@@ -676,7 +720,7 @@ class MessageStatusViewSet(viewsets.ReadOnlyModelViewSet):
     
     queryset = MessageStatus.objects.all()
     serializer_class = MessageStatusSerializer
-   
+    permission_classes = [IsAuthenticated]
     
     def get_queryset(self):
         """Filter queryset based on query parameters"""
@@ -696,6 +740,16 @@ class MessageStatusViewSet(viewsets.ReadOnlyModelViewSet):
         status = self.request.query_params.get('status')
         if status:
             queryset = queryset.filter(status=status)
+        
+        # Filter by channel
+        channel = self.request.query_params.get('channel')
+        if channel:
+            queryset = queryset.filter(channel=channel)
+        
+        # Filter by sender_id
+        sender_id = self.request.query_params.get('sender_id')
+        if sender_id:
+            queryset = queryset.filter(sender_id=sender_id)
         
         # Filter by phone number
         phone_number = self.request.query_params.get('phone_number')
@@ -744,7 +798,7 @@ class CampaignProgressViewSet(viewsets.ReadOnlyModelViewSet):
     
     queryset = CampaignProgress.objects.all().select_related('campaign')
     serializer_class = CampaignProgressSerializer
-   
+    permission_classes = [IsAuthenticated]
     
     def get_queryset(self):
         """Filter queryset based on query parameters"""
@@ -791,9 +845,7 @@ class BatchStatusViewSet(viewsets.ReadOnlyModelViewSet):
             queryset = queryset.filter(status=status)
         
         return queryset
-from rest_framework import viewsets
-from django.contrib.auth.models import User
-from .serializers import UserSerializer
+
 
 class UserViewSet(viewsets.ModelViewSet):
     """
@@ -806,10 +858,10 @@ class UserViewSet(viewsets.ModelViewSet):
         """Set permissions based on action"""
         if self.action == 'create':
             # Allow anyone to register
-            permission_classes = [permissions.AllowAny]
+            permission_classes = [AllowAny]
         else:
             # Require authentication for other actions
-            permission_classes = [permissions.IsAuthenticated]
+            permission_classes = [IsAuthenticated]
         return [permission() for permission in permission_classes]
     
     @action(detail=False, methods=['get'])
@@ -817,6 +869,8 @@ class UserViewSet(viewsets.ModelViewSet):
         """Get current user details"""
         serializer = self.get_serializer(request.user)
         return Response(serializer.data)
+
+
 __all__ = [
     'CampaignViewSet',
     'ScheduleViewSet',

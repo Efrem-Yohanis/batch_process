@@ -257,12 +257,23 @@ class CampaignProgressSerializer(serializers.ModelSerializer):
         read_only_fields = ['started_at', 'updated_at']
 
 
+class ChannelChoiceSerializer(serializers.Serializer):
+    """Serializer for channel choices"""
+    value = serializers.CharField()
+    display = serializers.CharField()
+
+    @classmethod
+    def get_choices(cls):
+        """Return list of channel choices"""
+        return [{'value': ch[0], 'display': ch[1]} for ch in Campaign.CHANNEL_CHOICES]
+
+
 class CampaignSerializer(serializers.ModelSerializer):
     """Enhanced Campaign serializer with nested related data"""
     
     schedule = ScheduleSerializer(read_only=True)
     message_content = MessageContentSerializer(read_only=True)
-    audience = AudienceSerializer(read_only=True)  # This now excludes recipients
+    audience = AudienceSerializer(read_only=True)
     progress = serializers.SerializerMethodField(read_only=True)
     checkpoint_info = serializers.SerializerMethodField(read_only=True)
     can_start = serializers.BooleanField(read_only=True)
@@ -272,11 +283,51 @@ class CampaignSerializer(serializers.ModelSerializer):
     class Meta:
         model = Campaign
         fields = [
-            'id', 'name', 'status', 'created_by', 'created_at', 'updated_at',
-            'schedule', 'message_content', 'audience', 'progress', 'checkpoint_info',
-            'can_start', 'can_pause', 'can_complete', 'is_deleted'
+            'id', 'name', 'status', 'sender_id', 'channels', 'created_by', 
+            'created_at', 'updated_at', 'schedule', 'message_content', 'audience', 
+            'progress', 'checkpoint_info', 'can_start', 'can_pause', 'can_complete', 
+            'is_deleted'
         ]
         read_only_fields = ['created_at', 'updated_at', 'created_by', 'is_deleted']
+        extra_kwargs = {
+            'sender_id': {
+                'required': False,
+                'allow_blank': True,
+                'help_text': 'Sender ID for this campaign (3-11 characters, alphanumeric and underscores only)'
+            },
+            'channels': {
+                'required': True,
+                'help_text': 'List of channels for this campaign. Options: sms, app_notification, flash_sms'
+            }
+        }
+
+    def validate_sender_id(self, value):
+        """Validate sender ID format"""
+        if value:
+            # Check length
+            if len(value) < 3 or len(value) > 11:
+                raise serializers.ValidationError(
+                    "Sender ID must be between 3 and 11 characters"
+                )
+            # Check characters (alphanumeric and underscore only)
+            if not re.match(r'^[A-Za-z0-9_]+$', value):
+                raise serializers.ValidationError(
+                    "Sender ID can only contain letters, numbers, and underscores"
+                )
+        return value
+
+    def validate_channels(self, value):
+        """Validate channels"""
+        if not value:
+            raise serializers.ValidationError("At least one channel must be selected")
+        
+        valid_channels = ['sms', 'app_notification', 'flash_sms']
+        for channel in value:
+            if channel not in valid_channels:
+                raise serializers.ValidationError(
+                    f"Invalid channel: {channel}. Valid options are: {valid_channels}"
+                )
+        return value
 
     def get_progress(self, obj):
         """Get campaign progress if exists"""
@@ -426,12 +477,24 @@ class BatchStatusSerializer(serializers.ModelSerializer):
 
 
 class MessageStatusSerializer(serializers.ModelSerializer):
-    """Serializer for message status"""
+    """Serializer for message status with sender_id and channel"""
     
     class Meta:
         model = MessageStatus
         fields = '__all__'
         read_only_fields = ['created_at', 'updated_at']
+        extra_kwargs = {
+            'sender_id': {
+                'required': False,
+                'allow_null': True,
+                'help_text': 'Sender ID used for this message'
+            },
+            'channel': {
+                'required': False,
+                'default': 'sms',
+                'help_text': 'Channel used for this message'
+            }
+        }
 
 
 class MessageStatusBulkCreateSerializer(serializers.Serializer):
@@ -446,7 +509,10 @@ class MessageStatusBulkCreateSerializer(serializers.Serializer):
     def validate_messages(self, value):
         """Validate each message in the bulk create"""
         required_fields = {'message_id', 'campaign_id', 'batch_id', 'phone_number'}
+        optional_fields = {'sender_id', 'channel'}
         errors = []
+        
+        valid_channels = ['sms', 'app_notification', 'flash_sms']
         
         for i, message in enumerate(value):
             message_errors = []
@@ -455,7 +521,7 @@ class MessageStatusBulkCreateSerializer(serializers.Serializer):
             provided = set(message.keys())
             missing = required_fields - provided
             if missing:
-                message_errors.append(f"missing fields: {sorted(missing)}")
+                message_errors.append(f"missing required fields: {sorted(missing)}")
             
             # Validate message_id format
             if 'message_id' in message:
@@ -472,6 +538,22 @@ class MessageStatusBulkCreateSerializer(serializers.Serializer):
                 phone = message['phone_number']
                 if not isinstance(phone, str):
                     message_errors.append("phone_number must be a string")
+            
+            # Validate sender_id if present
+            if 'sender_id' in message:
+                sender_id = message['sender_id']
+                if not isinstance(sender_id, str):
+                    message_errors.append("sender_id must be a string")
+                elif sender_id and (len(sender_id) < 3 or len(sender_id) > 11):
+                    message_errors.append("sender_id must be between 3 and 11 characters")
+            
+            # Validate channel if present
+            if 'channel' in message:
+                channel = message['channel']
+                if channel not in valid_channels:
+                    message_errors.append(
+                        f"Invalid channel: {channel}. Valid options: {valid_channels}"
+                    )
             
             if message_errors:
                 errors.append(f"message[{i}]: {'; '.join(message_errors)}")
@@ -514,8 +596,22 @@ class CampaignActionSerializer(serializers.Serializer):
         
         # Check if action is allowed
         if action == 'start' and not campaign.can_start():
+            errors = []
+            if campaign.status != 'draft':
+                errors.append(f"Campaign must be in 'draft' status (current: {campaign.status})")
+            if not campaign.sender_id:
+                errors.append("Sender ID is required")
+            if not campaign.channels:
+                errors.append("At least one channel must be selected")
+            if not hasattr(campaign, 'schedule'):
+                errors.append("Schedule is required")
+            if not hasattr(campaign, 'message_content'):
+                errors.append("Message content is required")
+            if not hasattr(campaign, 'audience'):
+                errors.append("Audience is required")
+            
             raise serializers.ValidationError(
-                "Campaign cannot be started. Ensure it has schedule, message content, and audience."
+                f"Campaign cannot be started. {'; '.join(errors)}"
             )
         elif action == 'stop' and not campaign.can_pause():
             raise serializers.ValidationError(
@@ -584,4 +680,5 @@ __all__ = [
     'CheckpointSerializer',
     'CampaignActionSerializer',
     'CheckpointInfoSerializer',
+    'ChannelChoiceSerializer',
 ]

@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  mock-sms-provider:
+    build: .
+    container_name: mock-sms-provider
+    restart: unless-stopped
+    ports:
+      - "8003:8003"
+    environment:
+      - MOCK_SUCCESS_RATE=0.98
+      - MOCK_RESPONSE_DELAY_MS=50
+      - MOCK_RANDOM_FAILURES=true
+      - MOCK_API_PORT=8003
+      - MOCK_API_HOST=0.0.0.0
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  default:
+    driver: bridge

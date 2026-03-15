@@ -33,10 +33,63 @@ INSTALLED_APPS = [
     'rest_framework',
     'corsheaders',
     'drf_yasg',
-    
+    'drf_spectacular',  # Add this
+    'drf_spectacular_sidecar',  # Optional - for offline assets
     # Your apps
     'scheduler_manager',
 ]
+
+# drf-spectacular settings
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'SMS Campaign Manager API',
+    'DESCRIPTION': '''
+    Comprehensive API for managing SMS campaigns with multi-language support.
+    
+    ## Features
+    - Campaign CRUD operations
+    - Multi-language message templates (EN, AM, TI, OM, SO)
+    - Audience management with recipient validation
+    - Campaign scheduling with time windows
+    - Progress tracking and monitoring
+    - Batch processing status
+    - Message delivery status tracking
+    - JWT Authentication
+    
+    ## Authentication
+    All endpoints except user registration require JWT authentication.
+    Obtain token via `/api/token/` endpoint.
+    ''',
+    'VERSION': '1.0.0',
+    'SERVE_INCLUDE_SCHEMA': False,
+    'COMPONENT_SPLIT_REQUEST': True,
+    'SWAGGER_UI_SETTINGS': {
+        'deepLinking': True,
+        'persistAuthorization': True,
+        'displayOperationId': True,
+        'docExpansion': 'list',
+        'filter': True,
+    },
+    'TAGS': [
+        {'name': 'Campaigns', 'description': 'Complete campaign management (CRUD + actions)'},
+        {'name': 'Campaign - Schedule', 'description': 'Campaign schedule management'},
+        {'name': 'Campaign - Message Content', 'description': 'Multi-language message template management'},
+        {'name': 'Campaign - Audience', 'description': 'Campaign recipient management'},
+        {'name': 'Campaign - Progress', 'description': 'Campaign progress and monitoring'},
+        {'name': 'Campaign - Actions', 'description': 'Campaign control actions (start/stop/complete)'},
+        {'name': 'Schedules', 'description': 'View all campaign schedules'},
+        {'name': 'Message Status', 'description': 'Message delivery status tracking'},
+        {'name': 'Campaign Progress', 'description': 'Campaign progress overview'},
+        {'name': 'Batches', 'description': 'Message batch processing status'},
+        {'name': 'Users', 'description': 'User management and registration'},
+        {'name': 'Authentication', 'description': 'JWT authentication endpoints'},
+    ],
+    'ENUM_NAME_OVERRIDES': {
+        'CampaignStatusEnum': 'scheduler_manager.models.Campaign.STATUS_CHOICES',
+        'ChannelEnum': 'scheduler_manager.models.Campaign.CHANNEL_CHOICES',
+        'MessageStatusEnum': 'scheduler_manager.models.MessageStatus.MESSAGE_STATUS_CHOICES',
+        'BatchStatusEnum': 'scheduler_manager.models.BatchStatus.BATCH_STATUS_CHOICES',
+    },
+}
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
