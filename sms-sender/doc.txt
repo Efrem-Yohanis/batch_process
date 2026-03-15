@@ -1,0 +1,427 @@
+Core Purpose
+Layer 3 is the execution engine of the SMS campaign system. It takes ready-to-send messages from Redis, fires them at the SMS provider at massive scale (4000 TPS), and reports what happened - all without ever touching the database.
+
+Think of it as a high-speed conveyor belt:
+
+Input: Messages waiting in Redis (from Layer 2)
+
+Process: Fire them at the provider at exactly 4000 per second
+
+Output: Status events to Kafka (for Layer 4 to process)
+
+📊 What It Actually Does
+1. Consumes Messages from Redis
+Pops messages in batches (default 1000) from sms:dispatch:queue
+
+Each message contains: message_id, campaign_id, phone number, text, language, retry_count
+
+Uses Redis pipelining for efficiency
+
+2. Rate-Limited Sending
+Maintains exactly 4000 transactions per second to the provider
+
+Never exceeds this limit - providers will ban you if you do
+
+Uses token bucket algorithm for smooth, burstable rate limiting
+
+3. Sends to 3rd Party Provider
+Makes parallel HTTP requests to the SMS provider's API
+
+Uses connection pooling (200 concurrent connections)
+
+HTTP/2 enabled for multiplexing
+
+Each request includes our message_id for tracking
+
+4. Handles Responses Intelligently
+Outcome	Action
+✅ Success	Publish SENT event to Kafka
+🔄 Temporary Failure (429, 5xx, timeout)	Push to retry queue with delay
+❌ Permanent Failure (400, 404, etc.)	Publish FAILED event to Kafka
+5. Manages Retries
+Exponential backoff: 60s → 300s → 900s
+
+Uses Redis SETEX for delayed retry queue
+
+Maximum 3 retries per message
+
+Retry count preserved across attempts
+
+6. Receives Delivery Reports
+Webhook endpoint at /webhook/delivery
+
+Provider sends delivery receipts (DELIVERED, FAILED, etc.)
+
+Publishes to sms-delivery-status Kafka topic
+
+7. Publishes Everything to Kafka
+sms-send-status: Result of sending attempt (SENT/FAILED)
+
+sms-delivery-status: Final delivery outcome from provider
+
+Zero direct database updates - fully event-driven
+
+🔧 How It Works - Detailed Flow
+The Main Loop
+text
+┌─────────────────┐
+│   Redis Queue   │
+│ sms:dispatch:queue
+└────────┬────────┘
+         │ POP batch (1000)
+         ▼
+┌─────────────────┐
+│  Rate Limiter   │
+│  Token Bucket   │←── Wait if needed
+│  4000 TPS       │
+└────────┬────────┘
+         ▼
+┌─────────────────┐
+│  Worker Pool    │
+│  4-8 workers    │
+└────────┬────────┘
+         │ Parallel sends
+         ▼
+┌─────────────────┐
+│ 3rd Party API   │
+│   Provider      │
+└────────┬────────┘
+         │ Response
+         ▼
+┌─────────────────┐
+│  Response Handler│
+├─────────────────┤
+│ ✅ Success      │→ Kafka: SENT
+│ 🔄 Retryable    │→ Redis: Retry queue
+│ ❌ Failed       │→ Kafka: FAILED
+└─────────────────┘
+The Token Bucket Algorithm
+The rate limiter ensures exactly 4000 TPS:
+
+python
+# Simplified example
+class TokenBucket:
+    def __init__(self, rate=4000):
+        self.rate = rate  # tokens per second
+        self.tokens = rate
+        self.last_refill = time.time()
+    
+    async def acquire(self, tokens=1000):
+        now = time.time()
+        elapsed = now - self.last_refill
+        
+        # Add new tokens based on elapsed time
+        self.tokens = min(self.rate, self.tokens + elapsed * self.rate)
+        self.last_refill = now
+        
+        if self.tokens >= tokens:
+            self.tokens -= tokens
+            return 0  # No wait
+        else:
+            # Need to wait for more tokens
+            return (tokens - self.tokens) / self.rate
+Worker Pool Architecture
+Multiple workers run in parallel for maximum throughput:
+
+text
+Worker 1 ──▶ API Request ──▶ Response
+Worker 2 ──▶ API Request ──▶ Response
+Worker 3 ──▶ API Request ──▶ Response
+Worker 4 ──▶ API Request ──▶ Response
+     │            │              │
+     └────────────┼──────────────┘
+                  ▼
+         ┌─────────────────┐
+         │  Connection     │
+         │    Pool         │
+         │  200 keep-alive │
+         └─────────────────┘
+Each worker:
+
+Waits for rate limit tokens
+
+Pops batch from Redis
+
+Sends batch in parallel (using asyncio.gather)
+
+Processes responses
+
+Loops forever
+
+Retry Mechanism
+Failed messages go through a sophisticated retry system:
+
+text
+Message fails (retryable)
+         │
+         ▼
+┌─────────────────┐
+│ Increment retry │
+│ count to 1      │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│ Push to Redis   │
+│ with TTL=60s    │
+│ key: sms:retry:msg_id
+└────────┬────────┘
+         │ After 60s
+         ▼
+┌─────────────────┐
+│ Message expires │
+│ and is lost?    │── NO! We need a retry scanner
+└─────────────────┘
+Note: Redis SETEX just stores the message with a TTL. When it expires, it's gone. A separate process (Layer 4) scans for expired retry messages and pushes them back to the main queue.
+
+Kafka-First Design
+This is the most important architectural decision:
+
+text
+Traditional (Bad):
+Layer 3 ──HTTP──▶ Django ──DB──▶ Update campaign status
+         (Tightly coupled, slow, blocking)
+
+Event-Driven (Good):
+Layer 3 ──Kafka──▶ sms-send-status topic
+         │
+         └──Kafka──▶ sms-delivery-status topic
+         
+Then later:
+Layer 4 consumes these topics and updates Django
+Why this matters:
+
+Decoupling: Layer 3 doesn't care if Django is up or down
+
+Scalability: Kafka can handle millions of events
+
+Reliability: If something crashes, events are still in Kafka
+
+Audit trail: Complete history of every message
+
+📦 Component Breakdown
+1. main.py - FastAPI Application
+Webhook endpoint for delivery reports
+
+Health and stats endpoints
+
+Manages sender lifecycle
+
+2. config.py - Configuration
+python
+REDIS_QUEUE_KEY = "sms:dispatch:queue"
+MAX_TPS = 4000
+BATCH_SIZE = 1000
+WORKER_COUNT = 4
+MAX_RETRIES = 3
+RETRY_DELAYS = [60, 300, 900]
+API_URL = "https://api.provider.com/v1/send"
+3. rate_limiter.py - Token Bucket
+Maintains 4000 TPS smoothly
+
+Thread-safe with asyncio locks
+
+Returns wait time if tokens unavailable
+
+4. api_client.py - Provider API Client
+Connection pooling (200 connections)
+
+HTTP/2 support
+
+Parallel request sending
+
+Error classification (retryable vs permanent)
+
+5. redis_client.py - Queue Manager
+Batch pop with pipeline
+
+Retry queue with TTL
+
+Queue size monitoring
+
+Backpressure detection
+
+6. kafka_client.py - Event Publisher
+Two topics: send-status, delivery-status
+
+Batching (linger_ms=5)
+
+Compression (gzip)
+
+Acks=1 for performance
+
+7. workers.py - Parallel Processors
+Configurable worker count
+
+Each worker independent
+
+Stats collection
+
+Graceful shutdown
+
+8. sender_engine.py - Orchestrator
+Starts/stops workers
+
+Manages lifecycle
+
+Reports statistics
+
+Handles shutdown
+
+🔄 Message Lifecycle - Complete Journey
+Stage 1: In Redis Queue
+json
+{
+  "message_id": "msg_abc123",
+  "campaign_id": 456,
+  "msisdn": "+1234567890",
+  "text": "Hello {{name}}, your offer is ready!",
+  "language": "en",
+  "retry_count": 0,
+  "timestamp": "2024-01-01T10:00:00Z"
+}
+Stage 2: Worker Picks It Up
+Popped from Redis with 999 other messages
+
+Rate limiter allows the batch through
+
+Worker sends to provider API
+
+Stage 3: Provider Response
+Success case:
+
+json
+{
+  "status": 200,
+  "body": {
+    "message_id": "prov_xyz789",
+    "status": "queued"
+  }
+}
+→ Publishes to sms-send-status with status="SENT"
+
+Temporary failure:
+
+json
+{
+  "status": 429,
+  "body": "Too Many Requests"
+}
+→ Retry count increments to 1
+→ Stored in Redis with TTL=60s
+
+Permanent failure:
+
+json
+{
+  "status": 400,
+  "body": "Invalid phone number"
+}
+→ Publishes to sms-send-status with status="FAILED"
+
+Stage 4: Delivery Report (Later)
+Provider calls webhook:
+
+json
+{
+  "message_id": "msg_abc123",
+  "provider_message_id": "prov_xyz789",
+  "status": "delivered",
+  "timestamp": "2024-01-01T10:00:05Z"
+}
+→ Publishes to sms-delivery-status with status="DELIVERED"
+
+📈 Performance Characteristics
+Throughput Calculations
+text
+Target: 4000 TPS
+Batch size: 1000 messages
+→ 4 batches per second
+→ 250ms per batch
+
+With 4 workers:
+→ Each worker processes 1 batch per second
+→ 250ms for API call + processing
+→ Comfortable margin
+Connection Pool
+text
+200 connections ÷ 4 workers = 50 connections per worker
+Each worker sends 1000 messages in parallel
+→ 20 messages per connection
+→ HTTP/2 multiplexing handles this efficiently
+Memory Usage
+Each message ~500 bytes
+
+500,000 queue size = 250MB Redis memory
+
+Retry queue additional ~50MB
+
+Well within Redis limits
+
+🔍 Monitoring & Observability
+Key Metrics
+Throughput: Messages/second (current and average)
+
+Success rate: % of messages sent successfully
+
+Retry rate: % of messages requiring retry
+
+Queue depth: Messages waiting in Redis
+
+Provider latency: Time to get response
+
+Error breakdown: By status code/type
+
+Health Checks
+Liveness: Is the process running?
+
+Readiness: Are Kafka/Redis connected?
+
+Provider: Is the API reachable?
+
+Logging
+Every batch processed
+
+Every failure with reason
+
+Rate limiting events
+
+Worker start/stop
+
+Stats every minute
+
+🚨 Failure Scenarios
+Provider Outage
+text
+Problem: Provider API is down (5xx errors)
+Detection: All requests failing with 5xx
+Action: 
+- Mark all as retryable
+- Push to retry queue with delays
+- Continue trying (provider may recover)
+- Alert if >10% failure rate
+Kafka Down
+text
+Problem: Can't publish status events
+Detection: Kafka producer errors
+Action:
+- Log errors locally
+- Continue sending? (No - we'd lose events)
+- Better to pause until Kafka recovers
+- Store failed events in memory with backpressure
+Redis Down
+text
+Problem: Can't pop messages or store retries
+Detection: Redis connection errors
+Action:
+- Pause all workers
+- Health check fails
+- Container restarts
+Rate Limit Exceeded
+text
+Problem: Provider returns 429
+Detection: Response status code
+Action:
+- Automatic retry with delay
+- Adjust rate limiter? (Provider may have lowered limit)
+- Alert if sustained 429s

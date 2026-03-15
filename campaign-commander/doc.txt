@@ -1,0 +1,260 @@
+ Layer 1: Campaign Command Ingestion Service
+🎯 Core Purpose
+Layer 1 is the front door of the entire system. It receives commands from Airflow (or any other scheduler), validates them with Django, and publishes them to Kafka for downstream processing.
+
+Think of it as a restaurant host:
+
+Takes your order (START/STOP/PAUSE/RESUME)
+
+Checks if it's valid (table exists, kitchen is ready)
+
+Sends order to kitchen (Kafka) and gives you a receipt (202 Accepted)
+
+📊 What It Actually Does
+1. Receives HTTP Commands
+REST API endpoints: /campaign/start, /stop, /pause, /resume, /complete
+
+Accepts JSON payload with campaign_id, optional user_id, reason
+
+Returns immediate 202 Accepted with tracking ID
+
+2. Validates with Django API
+For every command, it checks:
+
+Exists: Does campaign 123 exist in Django?
+
+Content (START only): Does it have message templates?
+
+Audience (START only): Does it have valid recipients?
+
+3. Publishes to Kafka
+Creates standardized command message with command_id, correlation_id
+
+Publishes to sms-commands topic
+
+Uses Kafka for reliable, ordered delivery
+
+4. Manages Authentication
+JWT tokens for Django API
+
+Automatic token refresh before expiry
+
+Thread-safe token management
+
+5. Tracks Requests with Correlation IDs
+Every request gets unique correlation_id
+
+Propagated to all downstream services
+
+Enables end-to-end tracing
+
+🔧 How It Works - Detailed Flow
+The Command Flow
+text
+Airflow ──POST──▶ Layer 1
+    │
+    ├─▶ Validate with Django
+    │      ├─▶ Campaign exists?
+    │      ├─▶ Has content? (START only)
+    │      └─▶ Has audience? (START only)
+    │
+    ├─▶ Generate command_id
+    │
+    ├─▶ Publish to Kafka (sms-commands)
+    │      ├─▶ command_id
+    │      ├─▶ campaign_id
+    │      ├─▶ command_type
+    │      └─▶ correlation_id
+    │
+    └─▶ Return 202 Accepted
+         ├─▶ command_id
+         └─▶ timestamp
+Example Request/Response
+Request:
+
+http
+POST /campaign/start
+Content-Type: application/json
+X-Correlation-ID: corr_abc123
+
+{
+  "campaign_id": 456,
+  "user_id": 789,
+  "reason": "Scheduled start from Airflow"
+}
+Response (202 Accepted):
+
+json
+{
+  "status": "accepted",
+  "message": "START command accepted",
+  "campaign_id": 456,
+  "command_id": "cmd_xyz789",
+  "timestamp": "2024-01-01T10:00:00Z"
+}
+Kafka Message:
+
+json
+{
+  "command_id": "cmd_xyz789",
+  "command_type": "START",
+  "campaign_id": 456,
+  "timestamp": "2024-01-01T10:00:00Z",
+  "source": "airflow",
+  "correlation_id": "corr_abc123",
+  "user_id": 789,
+  "reason": "Scheduled start from Airflow"
+}
+Token Management
+Layer 1 maintains JWT tokens for Django authentication:
+
+python
+# Token refresh logic
+if current_time >= token_expiry - 60:  # Refresh 60s before expiry
+    if refresh_token:
+        try refresh
+    else:
+        get new token with credentials
+📦 Component Breakdown
+1. main.py - The FastAPI Application
+Sets up endpoints
+
+Manages lifespan (startup/shutdown)
+
+Adds correlation ID middleware
+
+Initializes all clients
+
+2. config.py - Configuration
+python
+KAFKA_BOOTSTRAP_SERVERS = "kafka:9092"
+CAMPAIGN_MANAGER_URL = "http://django-app:8000"
+DJANGO_USERNAME = "test"
+DJANGO_PASSWORD = "test"
+LOG_LEVEL = "INFO"
+3. models.py - Data Models
+python
+class CommandRequest(BaseModel):
+    campaign_id: int
+    user_id: Optional[int]
+    reason: Optional[str]
+
+class CommandResponse(BaseModel):
+    status: str = "accepted"
+    message: str
+    campaign_id: int
+    command_id: str
+    timestamp: str
+4. token_manager.py - JWT Management
+Acquires tokens on startup
+
+Refreshes automatically
+
+Thread-safe with asyncio locks
+
+Provides auth headers for requests
+
+5. validators.py - Campaign Validation
+python
+async def validate_for_action(campaign_id, action):
+    # Check existence (always)
+    exists = await check_exists(campaign_id)
+    
+    if action == "START":
+        # Extra checks for START
+        await check_content(campaign_id)
+        await check_audience(campaign_id)
+6. kafka_publisher.py - Kafka Client
+Publishes commands to sms-commands
+
+Uses acks="all" for reliability
+
+Compresses with gzip
+
+Includes correlation ID in messages
+
+🔄 Message Lifecycle
+Stage 1: HTTP Request
+text
+POST /campaign/start
+Headers: X-Correlation-ID: corr_123
+Body: {"campaign_id": 456}
+Stage 2: Validation
+text
+→ GET /api/campaigns/456/ (Django)
+← 200 OK with campaign data
+→ GET /api/campaigns/456/message-content/
+← 200 OK with templates
+→ GET /api/campaigns/456/audience/
+← 200 OK with recipient count
+Stage 3: Kafka Publication
+text
+→ Produce to sms-commands
+  Key: 456 (campaign_id)
+  Value: {command message}
+← Ack from Kafka
+Stage 4: Response
+text
+← 202 Accepted
+  Body: {command_id, timestamp}
+📈 Performance Characteristics
+Throughput
+Designed for hundreds of commands per second
+
+Each validation: 3-4 API calls to Django
+
+Kafka production: < 10ms per message
+
+Total latency: 200-500ms per command
+
+Scaling
+Stateless - can run multiple instances
+
+Load balancer distributes HTTP requests
+
+Kafka handles consumer groups automatically
+
+🔍 Monitoring & Observability
+Key Metrics
+Command rate: Commands per second by type
+
+Validation latency: Time to validate with Django
+
+Kafka latency: Time to publish
+
+Error rate: Failed validations
+
+Token expiry: Time until next refresh
+
+Logging
+Every request logged with:
+
+Correlation ID
+
+Command type
+
+Campaign ID
+
+Validation result
+
+Kafka offset
+
+🚨 Failure Scenarios
+Django Unavailable
+text
+Problem: Can't validate campaigns
+Action: Return 503 Service Unavailable
+Impact: No new commands processed
+Recovery: Retry with exponential backoff
+Kafka Unavailable
+text
+Problem: Can't publish commands
+Action: Fail the request (no queueing)
+Impact: Commands lost if not accepted
+Recovery: Wait for Kafka, then resume
+Token Expired
+text
+Problem: JWT token invalid
+Action: Refresh automatically
+Impact: Single request may fail
+Recovery: Retry with new token

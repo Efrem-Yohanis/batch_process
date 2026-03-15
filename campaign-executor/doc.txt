@@ -1,0 +1,394 @@
+Core Purpose
+Layer 2 is the brain of the system. It consumes commands from Kafka, fetches campaign configuration from Django, streams millions of recipients directly from PostgreSQL, builds personalized messages, and queues them in Redis for sending.
+
+Think of it as a factory assembly line:
+
+Gets work orders (START commands)
+
+Fetches blueprints (campaign metadata)
+
+Pulls raw materials (recipients from DB)
+
+Assembles products (personalized messages)
+
+Packages them for shipping (Redis queue)
+
+📊 What It Actually Does
+1. Listens for Commands
+Consumes from sms-commands Kafka topic
+
+Handles START, STOP, PAUSE, RESUME
+
+Maintains campaign state (RUNNING, PAUSED, STOPPED)
+
+2. Fetches Campaign Metadata
+For each START command:
+
+Templates: Multi-language message templates
+
+Audience summary: Total/valid recipient counts
+
+Checkpoint: Last processed recipient ID
+
+Status: Current campaign state
+
+3. Streams Recipients from PostgreSQL
+Direct database connection (no API)
+
+Keyset pagination: WHERE id > last_id
+
+Batches of 50,000 recipients
+
+Only PENDING status recipients
+
+Includes phone numbers, language, variables
+
+4. Builds Personalized Messages
+For each recipient:
+
+Match language to template (or use default)
+
+Replace placeholders like {{name}} with actual values
+
+Generate unique message_id
+
+Create ready-to-send SMS object
+
+5. Queues in Redis
+Pushes batches to sms:dispatch:queue
+
+Uses Redis pipeline for efficiency
+
+Checks backpressure before pushing
+
+If queue > 500,000, wait 2 seconds
+
+6. Updates Checkpoints
+After each batch:
+
+Save last_processed_id in database
+
+Update total_processed count
+
+Enables resuming after pause/stop
+
+7. Publishes Progress
+Sends batch completion events to Kafka
+
+Topic: sms-batch-started
+
+Includes batch number, message count, ID ranges
+
+8. Respects Campaign Control
+PAUSE: Stop fetching new batches
+
+RESUME: Continue from last checkpoint
+
+STOP: Terminate processing
+
+🔧 How It Works - Detailed Flow
+The Processing Loop
+text
+Kafka Command ──▶ Layer 2
+    (START campaign 456)
+         │
+         ▼
+┌─────────────────┐
+│ Fetch Metadata  │
+│ from Django API │
+│ - Templates     │
+│ - Total count   │
+│ - Checkpoint    │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│ Initialize      │
+│ last_id = checkpoint │
+└────────┬────────┘
+         │
+         ▼
+    ┌────────────┐
+    │ Main Loop  │◀─────────────────┐
+    └────┬───────┘                  │
+         │                          │
+         ▼                          │
+┌─────────────────┐                 │
+│ Check Status    │                 │
+│ Still RUNNING?  │──NO──▶ Exit     │
+└────────┬────────┘                 │
+         │ YES                       │
+         ▼                           │
+┌─────────────────┐                 │
+│ Check Back-     │                 │
+│ pressure        │──HIGH──▶ Wait    │
+└────────┬────────┘                 │
+         │ LOW                        │
+         ▼                           │
+┌─────────────────┐                 │
+│ Fetch Batch     │                 │
+│ FROM PostgreSQL │                 │
+│ WHERE id > last │                 │
+│ LIMIT 50000     │                 │
+└────────┬────────┘                 │
+         │                           │
+         ▼                           │
+┌─────────────────┐                 │
+│ Build Messages  │                 │
+│ - Match language│                 │
+│ - Replace vars  │                 │
+│ - Generate IDs  │                 │
+└────────┬────────┘                 │
+         │                           │
+         ▼                           │
+┌─────────────────┐                 │
+│ Push to Redis   │                 │
+│ Pipeline RPUSH  │                 │
+│ sms:dispatch:queue                │
+└────────┬────────┘                 │
+         │                           │
+         ▼                           │
+┌─────────────────┐                 │
+│ Update Check-   │                 │
+│ point in DB     │                 │
+│ last_id = max   │                 │
+└────────┬────────┘                 │
+         │                           │
+         ▼                           │
+┌─────────────────┐                 │
+│ Publish Progress│                 │
+│ to Kafka        │                 │
+│ batch_completed │                 │
+└────────┬────────┘                 │
+         │                           │
+         └───────────────────────────┘
+Keyset Pagination Example
+sql
+-- First batch (last_id = 0)
+SELECT id, msisdn, language, variables
+FROM scheduler_manager_audience
+WHERE campaign_id = 456 
+  AND id > 0
+  AND status = 'PENDING'
+ORDER BY id
+LIMIT 50000;
+
+-- Second batch (last_id = 50000)
+SELECT ...
+WHERE campaign_id = 456 
+  AND id > 50000
+  ...
+Message Building
+python
+# Template from Django
+templates = {
+    "en": "Hello {{name}}, your offer expires {{date}}!",
+    "es": "Hola {{name}}, tu oferta expira {{date}}!"
+}
+
+# Recipient from DB
+recipient = {
+    "id": 12345,
+    "msisdn": "+1234567890",
+    "language": "es",
+    "variables": {
+        "name": "Juan",
+        "date": "2024-12-31"
+    }
+}
+
+# Built message
+message = {
+    "message_id": "msg_abc123",
+    "campaign_id": 456,
+    "msisdn": "+1234567890",
+    "text": "Hola Juan, tu oferta expira 2024-12-31!",
+    "language": "es",
+    "retry_count": 0,
+    "timestamp": "2024-01-01T10:00:00Z",
+    "recipient_id": 12345
+}
+📦 Component Breakdown
+1. main.py - Entry Point
+Sets up health check server (port 8003)
+
+Initializes all clients
+
+Starts Kafka consumer
+
+Manages lifecycle
+
+2. config.py - Configuration
+python
+KAFKA_COMMAND_TOPIC = "sms-commands"
+KAFKA_PROGRESS_TOPIC = "sms-batch-started"
+POSTGRES_DSN = "postgresql://user:pass@host/db"
+REDIS_QUEUE_KEY = "sms:dispatch:queue"
+BATCH_SIZE = 50000
+MAX_QUEUE_SIZE = 500000
+3. api_client.py - Django API Client
+Fetches campaign metadata
+
+Automatic JWT token refresh
+
+Marks campaigns complete
+
+Health checks
+
+4. database.py - PostgreSQL Client
+Connection pooling (2-10 connections)
+
+Keyset pagination queries
+
+Checkpoint updates
+
+Transaction management
+
+5. redis_client.py - Redis Client
+Queue size monitoring
+
+Batch push with pipeline
+
+Backpressure detection
+
+6. kafka_client.py - Kafka Client
+Consumer for commands
+
+Producer for progress
+
+Offset management
+
+7. message_builder.py - Message Assembly
+Template selection
+
+Placeholder replacement
+
+Message ID generation
+
+Language matching
+
+8. campaign_engine.py - Core Logic
+Main processing loop
+
+State management
+
+Error handling
+
+Progress tracking
+
+9. command_handler.py - Command Routing
+START/STOP/PAUSE/RESUME
+
+Campaign status tracking
+
+Task management
+
+🔄 Message Lifecycle
+Stage 1: Command Received
+text
+Kafka: sms-commands
+Message: START campaign 456
+Stage 2: Metadata Fetched
+text
+→ GET /api/campaigns/456/ (Django)
+← Templates, counts, checkpoint
+Stage 3: Recipients Streamed
+text
+→ SELECT FROM audience WHERE campaign_id=456 AND id>0
+← 50,000 recipients
+Stage 4: Messages Built
+text
+Input: 50,000 recipients + templates
+Output: 50,000 SMSMessage objects
+Stage 5: Redis Queue
+text
+→ RPUSH sms:dispatch:queue [50,000 messages]
+← OK
+Stage 6: Checkpoint Updated
+text
+→ UPDATE checkpoint SET last_id=50000
+← OK
+Stage 7: Progress Published
+text
+→ Kafka: sms-batch-started
+  batch_number: 1
+  message_count: 50000
+  first_id: 1
+  last_id: 50000
+📈 Performance Characteristics
+Throughput
+Batch size: 50,000 messages
+
+Time per batch: 2-5 seconds
+
+Throughput: 10,000-25,000 msgs/sec
+
+Memory: ~50MB per batch
+
+Database Load
+1 query per batch (very efficient)
+
+Index on (campaign_id, id, status)
+
+No table scans
+
+Connection pool amortizes overhead
+
+Redis Load
+Pipeline: 50,000 commands in one go
+
+Memory: ~25MB per batch
+
+Network: ~50MB per batch
+
+🔍 Monitoring & Observability
+Key Metrics
+Processing rate: Messages/second
+
+Batch time: Seconds per batch
+
+Queue depth: Redis queue size
+
+Checkpoint lag: Last ID vs total
+
+Campaign status: Running/paused count
+
+Logging
+Every batch logged with:
+
+Campaign ID
+
+Batch number
+
+Message count
+
+ID range
+
+Processing time
+
+Rate
+
+🚨 Failure Scenarios
+PostgreSQL Unavailable
+text
+Problem: Can't fetch recipients
+Action: Pause campaign, retry connection
+Impact: No progress until DB recovers
+Recovery: Exponential backoff reconnection
+Redis Full
+text
+Problem: Queue > MAX_QUEUE_SIZE
+Action: Wait 2 seconds, check again
+Impact: Processing slows down
+Recovery: Wait for Layer 3 to consume
+Django Unavailable
+text
+Problem: Can't fetch metadata
+Action: Fail START command
+Impact: New campaigns can't start
+Recovery: Retry with backoff
+Kafka Offset Lost
+text
+Problem: Don't know where we were
+Action: Reset to earliest or latest?
+Decision: Use checkpoint in DB, not Kafka
