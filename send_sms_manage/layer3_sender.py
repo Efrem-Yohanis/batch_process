@@ -1,6 +1,6 @@
 """
 Layer 3: High-Throughput SMS Sender
-Single file implementation for 4000 TPS with batch processing, rate limiting, and retry logic
+Updated with Kafka-first architecture - no direct Django calls
 """
 
 import os
@@ -22,16 +22,13 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 # =============== DOCKER-SPECIFIC DEFAULTS ===============
-# These will be used if environment variables are not set
 DOCKER_DEFAULTS = {
     "REDIS_URL": "redis://redis:6379/0",
     "REDIS_QUEUE_KEY": "sms:dispatch:queue",
     "REDIS_RETRY_KEY": "sms:retry:queue",
     "KAFKA_BOOTSTRAP_SERVERS": "kafka:9092",
+    "KAFKA_SEND_STATUS_TOPIC": "sms-send-status",  # New topic for send status
     "KAFKA_DELIVERY_TOPIC": "sms-delivery-status",
-    "DJANGO_URL": "http://django-app:8000",
-    "DJANGO_USERNAME": "test",
-    "DJANGO_PASSWORD": "test",
     "API_URL": "https://api.your-sms-provider.com/v1/send",  # REPLACE THIS
     "API_KEY": "your-actual-api-key-here",  # REPLACE THIS
     "API_TIMEOUT": "5",
@@ -127,14 +124,16 @@ class Config:
     API_KEY: str = os.getenv("API_KEY", "your-actual-api-key-here")
     API_TIMEOUT: int = int(os.getenv("API_TIMEOUT", "5"))
     
-    # Django API
+    # Kafka - Updated with new topics
+    KAFKA_BOOTSTRAP_SERVERS: str = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
+    KAFKA_SEND_STATUS_TOPIC: str = os.getenv("KAFKA_SEND_STATUS_TOPIC", "sms-send-status")
+    KAFKA_DELIVERY_TOPIC: str = os.getenv("KAFKA_DELIVERY_TOPIC", "sms-delivery-status")
+    
+    # Django API - No longer needed for Layer 3, but kept for backward compatibility
+    # Will be removed in next version
     DJANGO_URL: str = os.getenv("DJANGO_URL", "http://django-app:8000")
     DJANGO_USERNAME: str = os.getenv("DJANGO_USERNAME", "test")
     DJANGO_PASSWORD: str = os.getenv("DJANGO_PASSWORD", "test")
-    
-    # Kafka
-    KAFKA_BOOTSTRAP_SERVERS: str = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
-    KAFKA_DELIVERY_TOPIC: str = os.getenv("KAFKA_DELIVERY_TOPIC", "sms-delivery-status")
 
 config = Config()
 
@@ -162,43 +161,6 @@ class APIResponse:
         self.retryable = retryable
         self.error = error
         self.status_code = status_code
-
-# =============== TOKEN MANAGER ===============
-class TokenManager:
-    """Manages JWT tokens for Django API authentication"""
-    
-    def __init__(self):
-        self.access_token = None
-        self.refresh_token = None
-        self.token_expiry = 0
-        self.lock = asyncio.Lock()
-        
-    async def get_valid_token(self) -> str:
-        async with self.lock:
-            current_time = time.time()
-            if not self.access_token or current_time >= self.token_expiry - 60:
-                await self._refresh_token()
-            return self.access_token
-    
-    async def _refresh_token(self):
-        try:
-            async with httpx.AsyncClient() as client:
-                # Try to get new token
-                response = await client.post(
-                    f"{config.DJANGO_URL}/api/token/",
-                    json={"username": config.DJANGO_USERNAME, "password": config.DJANGO_PASSWORD},
-                    timeout=10.0
-                )
-                if response.status_code == 200:
-                    data = response.json()
-                    self.access_token = data['access']
-                    self.refresh_token = data.get('refresh')
-                    self.token_expiry = time.time() + 280  # 5 min - 20s
-                    logger.info("[OK] Django token acquired")
-                else:
-                    logger.error(f"[ERROR] Token acquisition failed: {response.status_code}")
-        except Exception as e:
-            logger.error(f"[ERROR] Token refresh error: {e}")
 
 # =============== RATE LIMITER ===============
 class TokenBucketRateLimiter:
@@ -299,75 +261,83 @@ class ThirdPartyAPIClient:
     async def close(self):
         await self.client.aclose()
 
-# =============== DJANGO CLIENT ===============
+# =============== DJANGO CLIENT - DEPRECATED ===============
+# Kept for backward compatibility but will be removed in next version
+# Layer 3 no longer directly updates Django
 class DjangoClient:
-    """Client for updating message status in Django"""
+    """DEPRECATED: Use Kafka events instead"""
     
-    def __init__(self, token_manager: TokenManager):
+    def __init__(self, token_manager=None):
         self.token_manager = token_manager
         self.client = httpx.AsyncClient(timeout=5.0)
+        logger.warning("[DEPRECATED] DjangoClient is deprecated. Use Kafka events instead.")
         
     async def update_status(self, message_id: str, status: str, provider_msg_id: str = None, 
                            provider_response: str = None, attempts: int = 0):
-        """Update message status in Django"""
-        try:
-            token = await self.token_manager.get_valid_token()
-            
-            payload = {
-                "status": status,
-                "attempts": attempts
-            }
-            if provider_msg_id:
-                payload["provider_message_id"] = provider_msg_id
-            if provider_response:
-                payload["provider_response"] = provider_response
-                
-            response = await self.client.patch(
-                f"{config.DJANGO_URL}/api/message-statuses/{message_id}/",
-                headers={"Authorization": f"Bearer {token}"},
-                json=payload
-            )
-            
-            if response.status_code == 200:
-                logger.debug(f"[OK] Updated {message_id} to {status}")
-            else:
-                logger.error(f"[ERROR] Failed to update {message_id}: {response.status_code}")
-                
-        except Exception as e:
-            logger.error(f"[ERROR] Django update error: {e}")
+        """DEPRECATED: This method should not be called"""
+        logger.error(f"[ERROR] Direct Django update attempted for {message_id}. This should be handled by Kafka consumer.")
+        # Do nothing - we want to fail loudly to catch any remaining calls
     
     async def close(self):
         await self.client.aclose()
 
-# =============== KAFKA CLIENT ===============
+# =============== KAFKA CLIENT - UPDATED ===============
 class KafkaClient:
-    """Publishes delivery events to Kafka"""
+    """Publishes send status and delivery events to Kafka"""
     
     def __init__(self):
         self.producer = None
         
     async def start(self):
+        """Start Kafka producer with optimized batching for high throughput"""
         self.producer = aiokafka.AIOKafkaProducer(
             bootstrap_servers=config.KAFKA_BOOTSTRAP_SERVERS,
-            value_serializer=lambda v: json.dumps(v).encode()
+            value_serializer=lambda v: json.dumps(v).encode(),
+            linger_ms=5,  # Small delay to batch messages
+            batch_size=32768,  # 32KB batches for better throughput
+            compression_type='gzip',  # Compress for better network utilization
+            max_batch_size=65536
         )
         await self.producer.start()
-        logger.info("[OK] Kafka producer started")
+        logger.info("[OK] Kafka producer started with optimized settings")
         
-    async def publish_delivery(self, message: SMSMessage, status: str, provider_msg_id: str = None):
-        """Publish delivery event to Kafka"""
+    async def publish_send_status(self, message: SMSMessage, status: str, provider_msg_id: str = None, error: str = None):
+        """
+        Publish send status event to Kafka (SENT or FAILED)
+        This replaces direct Django updates
+        """
         try:
             event = {
-                "event_type": f"MESSAGE_{status}",
+                "event_type": "SEND_STATUS",
                 "message_id": message.message_id,
                 "campaign_id": message.campaign_id,
                 "msisdn": message.msisdn,
-                "status": status,
+                "status": status,  # "SENT" or "FAILED"
                 "provider_message_id": provider_msg_id,
+                "error": error,
+                "retry_count": message.retry_count,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+            await self.producer.send(config.KAFKA_SEND_STATUS_TOPIC, event)
+            logger.debug(f"[KAFKA] Published send status {status} for {message.message_id}")
+        except Exception as e:
+            logger.error(f"[ERROR] Kafka publish error: {e}")
+    
+    async def publish_delivery_status(self, message_id: str, provider_message_id: str, status: str, error: str = None):
+        """
+        Publish delivery status event to Kafka (from webhook)
+        """
+        try:
+            event = {
+                "event_type": "DELIVERY_STATUS",
+                "message_id": message_id,
+                "provider_message_id": provider_message_id,
+                "status": status,  # "DELIVERED", "FAILED", etc.
+                "error": error,
                 "timestamp": datetime.utcnow().isoformat()
             }
             await self.producer.send(config.KAFKA_DELIVERY_TOPIC, event)
-            logger.debug(f"[INFO] Published {status} event to Kafka")
+            logger.debug(f"[KAFKA] Published delivery status {status} for {message_id}")
         except Exception as e:
             logger.error(f"[ERROR] Kafka publish error: {e}")
     
@@ -423,16 +393,16 @@ class RedisClient:
         if self.client:
             await self.client.close()
 
-# =============== MAIN PROCESSOR ===============
+# =============== MAIN PROCESSOR - UPDATED ===============
 class SMSSender:
-    """Main SMS sending orchestrator"""
+    """Main SMS sending orchestrator - Now Kafka-first, no direct Django updates"""
     
     def __init__(self):
-        self.token_manager = TokenManager()
-        self.api_client = ThirdPartyAPIClient()
-        self.django_client = DjangoClient(self.token_manager)
+        # Django client kept for backward compatibility but not used
+        self.django_client = None  # Will be initialized only if needed
         self.kafka_client = KafkaClient()
         self.redis_client = RedisClient()
+        self.api_client = ThirdPartyAPIClient()
         self.rate_limiter = TokenBucketRateLimiter(config.MAX_TPS)
         self.running = True
         self.stats = {
@@ -445,19 +415,20 @@ class SMSSender:
         
     async def start(self):
         """Start all clients and begin processing"""
-        logger.info("[START] Starting Layer 3 SMS Sender")
+        logger.info("[START] Starting Layer 3 SMS Sender (Kafka-first architecture)")
         logger.info(f"[CONFIG] Configuration:")
         logger.info(f"   - Redis: {config.REDIS_URL}")
         logger.info(f"   - Kafka: {config.KAFKA_BOOTSTRAP_SERVERS}")
-        logger.info(f"   - Django: {config.DJANGO_URL}")
+        logger.info(f"   - Kafka Send Topic: {config.KAFKA_SEND_STATUS_TOPIC}")
+        logger.info(f"   - Kafka Delivery Topic: {config.KAFKA_DELIVERY_TOPIC}")
         logger.info(f"   - API URL: {config.API_URL}")
         logger.info(f"   - Max TPS: {config.MAX_TPS}")
         logger.info(f"   - Batch Size: {config.BATCH_SIZE}")
         logger.info(f"   - Workers: {config.WORKER_COUNT}")
+        logger.info("[NOTE] Direct Django updates are disabled - using Kafka events only")
         
         await self.redis_client.connect()
         await self.kafka_client.start()
-        await self.token_manager.get_valid_token()
         
         # Start worker tasks
         workers = []
@@ -503,28 +474,26 @@ class SMSSender:
                 await asyncio.sleep(1)
     
     async def _process_response(self, response: APIResponse):
-        """Process API response (success, failure, retry)"""
+        """
+        Process API response - ONLY publishes to Kafka, no Django updates
+        """
         message = response.message
         
         if response.success:
-            # Success - update to SENT
+            # Success - publish SEND_STATUS to Kafka
             self.stats["sent"] += 1
             self.stats["total_processed"] += 1
             
-            await self.django_client.update_status(
-                message_id=message.message_id,
+            await self.kafka_client.publish_send_status(
+                message=message,
                 status="SENT",
-                provider_msg_id=response.provider_message_id,
-                provider_response="Message accepted by provider",
-                attempts=message.retry_count + 1
+                provider_msg_id=response.provider_message_id
             )
             
-            await self.kafka_client.publish_delivery(
-                message, "SENT", response.provider_message_id
-            )
+            logger.debug(f"[OK] Message {message.message_id} sent successfully, published to Kafka")
             
         elif response.retryable and message.retry_count < config.MAX_RETRIES:
-            # Retryable failure - schedule retry
+            # Retryable failure - schedule retry (no Kafka event yet)
             self.stats["retried"] += 1
             new_retry_count = message.retry_count + 1
             delay = config.RETRY_DELAYS[new_retry_count - 1]
@@ -536,18 +505,16 @@ class SMSSender:
             log.info(f"[RETRY] Message {message.message_id} scheduled for retry {new_retry_count}/{config.MAX_RETRIES} in {delay}s")
             
         else:
-            # Permanent failure
+            # Permanent failure - publish FAILED status to Kafka
             self.stats["failed"] += 1
             self.stats["total_processed"] += 1
             
-            await self.django_client.update_status(
-                message_id=message.message_id,
+            await self.kafka_client.publish_send_status(
+                message=message,
                 status="FAILED",
-                provider_response=response.error,
-                attempts=message.retry_count + 1
+                error=response.error
             )
             
-            await self.kafka_client.publish_delivery(message, "FAILED")
             logger.error(f"[ERROR] Message {message.message_id} permanently failed: {response.error}")
     
     async def _stats_reporter(self):
@@ -571,11 +538,12 @@ class SMSSender:
         logger.info("[SHUTDOWN] Shutting down Layer 3...")
         self.running = False
         await self.api_client.close()
-        await self.django_client.close()
+        if self.django_client:
+            await self.django_client.close()
         await self.kafka_client.stop()
         await self.redis_client.close()
 
-# =============== FASTAPI WEBHOOK ENDPOINTS ===============
+# =============== FASTAPI WEBHOOK ENDPOINTS - UPDATED ===============
 # Global sender instance
 sender = None
 
@@ -602,30 +570,36 @@ class DeliveryReport(BaseModel):
 async def delivery_report(report: DeliveryReport):
     """
     Webhook endpoint for async delivery reports from 3rd party API
-    Updates message status to DELIVERED
+    Now publishes to Kafka instead of updating Django directly
     """
     logger.info(f"[WEBHOOK] Received delivery report for {report.message_id}: {report.status}")
     
-    if sender and report.status.lower() == "delivered":
-        await sender.django_client.update_status(
+    if sender and sender.kafka_client and sender.kafka_client.producer:
+        # Map provider status to our status
+        status_map = {
+            "delivered": "DELIVERED",
+            "failed": "FAILED",
+            "pending": "PENDING",
+            "sent": "SENT",
+            "read": "READ"
+        }
+        
+        our_status = status_map.get(report.status.lower(), report.status.upper())
+        
+        # Publish to Kafka only - no Django direct update
+        await sender.kafka_client.publish_delivery_status(
             message_id=report.message_id,
-            status="DELIVERED",
-            provider_msg_id=report.provider_message_id
+            provider_message_id=report.provider_message_id,
+            status=our_status,
+            error=report.error
         )
         
-        # Also publish to Kafka
-        if sender.kafka_client and sender.kafka_client.producer:
-            await sender.kafka_client.producer.send(
-                config.KAFKA_DELIVERY_TOPIC,
-                {
-                    "event_type": "MESSAGE_DELIVERED",
-                    "message_id": report.message_id,
-                    "provider_message_id": report.provider_message_id,
-                    "timestamp": datetime.utcnow().isoformat()
-                }
-            )
+        logger.info(f"[WEBHOOK] Published delivery status to Kafka for {report.message_id}")
+    else:
+        logger.error(f"[WEBHOOK] Kafka client not available")
     
-    return {"status": "received"}
+    # Always return 200 to acknowledge receipt
+    return {"status": "received", "message": "Delivery report acknowledged"}
 
 @app.get("/health")
 async def health():
@@ -635,7 +609,7 @@ async def health():
     
     return {
         "status": "healthy",
-        "service": "Layer 3 SMS Sender",
+        "service": "Layer 3 SMS Sender (Kafka-first)",
         "tps_limit": config.MAX_TPS,
         "workers": config.WORKER_COUNT,
         "stats": {

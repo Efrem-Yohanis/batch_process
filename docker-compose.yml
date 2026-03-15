@@ -79,7 +79,7 @@ services:
         echo 'Waiting for database...' &&
         sleep 5 &&
         python manage.py migrate --noinput &&
-        echo ' Migrations complete' &&
+        echo '✓ Migrations complete' &&
         echo \"from django.contrib.auth import get_user_model; User = get_user_model(); User.objects.filter(username='admin').exists() or User.objects.create_superuser('admin', 'admin@example.com', 'admin123')\" | python manage.py shell &&
         python manage.py runserver 0.0.0.0:8000
       "
@@ -216,7 +216,12 @@ services:
       KAFKA_ADVERTISED_HOST_NAME: kafka
       KAFKA_ADVERTISED_PORT: 9092
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_CREATE_TOPICS: "sms-commands:3:1,sms-batch-started:3:1,sms-delivery-status:3:1,sms-retry:1:1"
+      KAFKA_CREATE_TOPICS: >-
+        sms-commands:3:1,
+        sms-batch-started:3:1,
+        sms-send-status:3:1,
+        sms-delivery-status:3:1,
+        sms-retry:1:1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
       KAFKA_DELETE_TOPIC_ENABLE: "true"
       KAFKA_LOG_RETENTION_HOURS: 168
@@ -252,9 +257,7 @@ services:
       - DJANGO_PASSWORD=test
       - PYTHONUNBUFFERED=1
     volumes:
-      # Use named volume for logs (no permission issues)
       - layer1-logs:/app/logs/layer1
-      # Mount code - NOT read-only to allow reload
       - ./send_sms_manage:/app
     command: python -m uvicorn layer1_ingestion:app --host 0.0.0.0 --port 8001 --reload
     depends_on:
@@ -278,7 +281,7 @@ services:
     container_name: sms-layer2
     restart: unless-stopped
     ports:
-      - "8005:8003"  # Health check port
+      - "8005:8003"
     environment:
       - SERVICE_NAME=layer2
       - LOG_LEVEL=INFO
@@ -300,11 +303,8 @@ services:
       - PYTHONUNBUFFERED=1
       - HEALTH_PORT=8003
     volumes:
-      # Use named volume for logs
       - layer2-logs:/app/logs/layer2
-      # Mount code - NOT read-only for execution
       - ./send_sms_manage:/app
-      # Mount django_project for access
       - ./django_project:/django_project
     command: python -u /app/layer2_queue_builder.py
     depends_on:
@@ -326,21 +326,24 @@ services:
     networks:
       - scheduler-network
 
-  # =============== LAYER 3: SMS SENDER ===============
+  # =============== LAYER 3: SMS SENDER (UPDATED - KAFKA-FIRST) ===============
   sms-layer3:
     build: ./send_sms_manage
     container_name: sms-layer3
     restart: unless-stopped
     ports:
       - "8002:8002"
+      - "8006:8003"  # Additional port for webhook
     environment:
       - SERVICE_NAME=layer3
       - LOG_LEVEL=INFO
       - LOG_DIR=/app/logs/layer3
       - LOG_RETENTION_DAYS=7
+      # Redis
       - REDIS_URL=redis://redis:6379/0
       - REDIS_QUEUE_KEY=sms:dispatch:queue
       - REDIS_RETRY_KEY=sms:retry:queue
+      # Processing
       - BATCH_SIZE=1000
       - MAX_TPS=4000
       - WORKER_COUNT=4
@@ -348,19 +351,21 @@ services:
       - RETRY_DELAY_1=60
       - RETRY_DELAY_2=300
       - RETRY_DELAY_3=900
+      # SMS Provider API
       - API_URL=http://mock-sms-provider:8003/api/send
       - API_KEY=mock-provider-no-auth-needed
       - API_TIMEOUT=5
+      # Kafka (UPDATED: Now using send-status topic)
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - KAFKA_SEND_STATUS_TOPIC=sms-send-status
+      - KAFKA_DELIVERY_TOPIC=sms-delivery-status
+      # Django - NO LONGER USED DIRECTLY (kept for backward compatibility)
       - DJANGO_URL=http://django-app:8000
       - DJANGO_USERNAME=test
       - DJANGO_PASSWORD=test
-      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
-      - KAFKA_DELIVERY_TOPIC=sms-delivery-status
       - PYTHONUNBUFFERED=1
     volumes:
-      # Use named volume for logs
       - layer3-logs:/app/logs/layer3
-      # Mount code - NOT read-only
       - ./send_sms_manage:/app
     command: python -u /app/layer3_sender.py
     depends_on:
@@ -368,8 +373,6 @@ services:
         condition: service_healthy
       kafka:
         condition: service_healthy
-      django-app:
-        condition: service_started
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
       interval: 30s
@@ -380,7 +383,64 @@ services:
     networks:
       - scheduler-network
 
-  # =============== KAFKA UI (monitoring) ===============
+  # =============== LAYER 4: STATUS UPDATER (NEW) ===============
+  sms-layer4:
+    build: ./send_sms_manage
+    container_name: sms-layer4
+    restart: unless-stopped
+    ports:
+      - "8007:8004"  # API port
+    environment:
+      - SERVICE_NAME=layer4
+      - LOG_LEVEL=INFO
+      - LOG_DIR=/app/logs/layer4
+      - LOG_RETENTION_DAYS=7
+      # Kafka
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - KAFKA_SEND_STATUS_TOPIC=sms-send-status
+      - KAFKA_DELIVERY_TOPIC=sms-delivery-status
+      - KAFKA_CONSUMER_GROUP=layer4-status-updater
+      # PostgreSQL (Django DB)
+      - POSTGRES_HOST=campaign-db
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=campaign_db
+      - POSTGRES_USER=campaign_user
+      - POSTGRES_PASSWORD=campaign_pass
+      # Django API (fallback)
+      - DJANGO_URL=http://django-app:8000
+      - DJANGO_USERNAME=test
+      - DJANGO_PASSWORD=test
+      # Processing
+      - BATCH_SIZE=1000
+      - BATCH_TIMEOUT_MS=100
+      - WORKER_COUNT=4
+      - MAX_DB_CONNECTIONS=20
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - layer4-logs:/app/logs/layer4
+      - ./send_sms_manage:/app
+    # Layer 4 can run in two modes:
+    # Default: API + Consumer (for health checks)
+    # Add --standalone to run as consumer only
+    command: python -u /app/layer4_updater.py
+    depends_on:
+      kafka:
+        condition: service_healthy
+      campaign-db:
+        condition: service_healthy
+      django-app:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    logging: *default-logging
+    networks:
+      - scheduler-network
+
+  # =============== MONITORING ===============
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
     container_name: kafka-ui
@@ -391,7 +451,7 @@ services:
       KAFKA_CLUSTERS_0_NAME: local
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
       KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
-      KAFKA_CLUSTERS_0_TOPICS: sms-commands,sms-batch-started,sms-delivery-status
+      KAFKA_CLUSTERS_0_TOPICS: sms-commands,sms-batch-started,sms-send-status,sms-delivery-status
     depends_on:
       kafka:
         condition: service_healthy
@@ -399,7 +459,6 @@ services:
     networks:
       - scheduler-network
 
-  # =============== REDIS COMMANDER (Redis UI) ===============
   redis-commander:
     image: rediscommander/redis-commander:latest
     container_name: redis-commander
@@ -415,18 +474,18 @@ services:
       - scheduler-network
 
   # =============== MOCK SMS PROVIDER ===============
-  # =============== MOCK SMS PROVIDER ===============
   mock-sms-provider:
     build: ./mock-sms-provider
     container_name: mock-sms-provider
     restart: unless-stopped
     ports:
-      - "8004:8003"  # Host port 8004 maps to container port 8003
+      - "8004:8003"
     environment:
       - MOCK_SUCCESS_RATE=0.98
       - MOCK_RESPONSE_DELAY_MS=50
       - MOCK_RANDOM_FAILURES=true
       - MOCK_API_PORT=8003
+      - WEBHOOK_URL=http://sms-layer3:8003/webhook/delivery
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
       interval: 30s
@@ -436,19 +495,62 @@ services:
     networks:
       - scheduler-network
 
+  # =============== UTILITIES ===============
+  # Kafka topic creator/manager
+  kafka-setup:
+    image: wurstmeister/kafka:latest
+    container_name: kafka-setup
+    command: >
+      bash -c "
+        echo 'Waiting for Kafka...' &&
+        sleep 10 &&
+        kafka-topics.sh --bootstrap-server kafka:9092 --list &&
+        echo 'Creating topics if not exist...' &&
+        kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic sms-send-status --partitions 3 --replication-factor 1 &&
+        kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic sms-delivery-status --partitions 3 --replication-factor 1 &&
+        echo '✓ Topics created successfully' &&
+        echo 'Topic list:' &&
+        kafka-topics.sh --bootstrap-server kafka:9092 --list
+      "
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks:
+      - scheduler-network
+
+  # Diagnostic tool
+  diagnostic:
+    build: ./send_sms_manage
+    container_name: diagnostic
+    command: ["diagnostic"]
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - REDIS_URL=redis://redis:6379/0
+      - POSTGRES_HOST=campaign-db
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=campaign_db
+      - POSTGRES_USER=campaign_user
+      - POSTGRES_PASSWORD=campaign_pass
+    depends_on:
+      - kafka
+      - redis
+      - campaign-db
+    networks:
+      - scheduler-network
 
 networks:
   scheduler-network:
     driver: bridge
 
 volumes:
-  # Named volumes for logs (managed by Docker, no permission issues)
+  # Named volumes for logs
   layer1-logs:
   layer2-logs:
   layer3-logs:
+  layer4-logs:
   airflow-logs:
   
-  # Your existing volumes
+  # Data volumes
   airflow-postgres-data:
   campaign-postgres-data:
   redis-data:
