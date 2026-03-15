@@ -1,0 +1,657 @@
+Layer 4: Status Updater Service - Deep Dive
+🎯 Core Purpose
+Layer 4 is the final piece of the SMS campaign system - it closes the loop on every message sent. Think of it as the accountant who:
+
+Receives receipts (Kafka events)
+
+Updates the ledger (PostgreSQL database)
+
+Follows up on failed transactions (via fallback API)
+
+Provides financial reports (statistics)
+
+Without Layer 4, you'd know you sent messages, but you'd never know if they were delivered, failed, or got lost in transit.
+
+📊 What It Actually Does
+1. Consumes Two Types of Events from Kafka
+Send Status Events (sms-send-status)
+Published by Layer 3 immediately after attempting to send:
+
+json
+{
+  "event_type": "SEND_STATUS",
+  "message_id": "msg_abc123",
+  "campaign_id": 456,
+  "status": "SENT",                    // or "FAILED"
+  "provider_message_id": "prov_xyz789", // only if successful
+  "error": "Invalid phone number",      // only if failed
+  "retry_count": 0,
+  "timestamp": "2024-01-01T10:00:00Z"
+}
+Delivery Status Events (sms-delivery-status)
+Published by Layer 3 when provider sends delivery receipt:
+
+json
+{
+  "event_type": "DELIVERY_STATUS",
+  "message_id": "msg_abc123",
+  "provider_message_id": "prov_xyz789",
+  "status": "DELIVERED",                // DELIVERED, FAILED, EXPIRED
+  "error": null,
+  "timestamp": "2024-01-01T10:00:05Z"
+}
+2. Batches Updates for Efficiency
+Instead of updating the database for every single message (which would be 4000 updates per second at peak), Layer 4 batches them:
+
+Approach	Database Queries	Performance
+Without batching	4000 queries/sec	❌ Database meltdown
+With batching (1000/batch)	4 queries/sec	✅ Happy database
+The batch processor uses two triggers:
+
+Size-based: When 1000 updates collected
+
+Time-based: When 100ms elapsed since first update
+
+3. Dual-Path Update Strategy
+Layer 4 has two ways to update message statuses, with automatic fallback:
+
+text
+                    ┌─────────────────┐
+                    │  Kafka Message  │
+                    └────────┬────────┘
+                             │
+                    ┌────────▼────────┐
+                    │  Add to Queue   │
+                    │  asyncio.Queue  │
+                    └────────┬────────┘
+                             │
+                    ┌────────▼────────┐
+                    │  Batch Ready?   │
+                    │  (1000 or 100ms)│
+                    └────────┬────────┘
+                             │
+                    ┌────────▼────────┐
+              ┌─────│  Process Batch  │─────┐
+              │     └─────────────────┘     │
+              │                              │
+      ┌───────▼───────┐              ┌──────▼──────┐
+      │  Path 1:      │              │  Path 2:    │
+      │  Direct DB    │──(fallback)─▶│  Django API │
+      │  (Primary)    │   if fails   │  (Fallback) │
+      └───────┬───────┘              └──────┬──────┘
+              │                              │
+      ┌───────▼───────┐              ┌──────▼──────┐
+      │  PostgreSQL   │              │  Django     │
+      │  Updated      │              │  Updated    │
+      └───────────────┘              └─────────────┘
+4. Tracks Complete Message Lifecycle
+Each message goes through up to 3 status updates:
+
+text
+Layer 2 ──┐
+          ▼
+    ┌─────────────┐
+    │  In Redis   │  (waiting to be sent)
+    └─────────────┘
+          │
+          ▼
+    ┌─────────────┐
+    │  SENT       │  ←── Layer 4 receives SEND_STATUS
+    └─────────────┘
+          │
+          ▼
+    ┌─────────────┐
+    │  DELIVERED  │  ←── Layer 4 receives DELIVERY_STATUS
+    └─────────────┘
+          │
+          ▼
+    ┌─────────────┐
+    │  COMPLETED  │  (campaign done)
+    └─────────────┘
+5. Provides Real-time Monitoring
+Layer 4 exposes detailed statistics:
+
+Kafka lag - How far behind we are
+
+Update rate - Messages processed per second
+
+Error rate - Failed updates
+
+Fallback usage - How often API path is used
+
+Token refreshes - API authentication health
+
+🔧 How It Works - Deep Technical Dive
+The Main Processing Pipeline
+text
+Kafka Partition 0 ──┐
+Kafka Partition 1 ──┼──▶ Consumer Group ──▶ asyncio.Queue ──▶ Batch Processor ──▶ Database
+Kafka Partition 2 ──┘        (layer4-group)     (size 10000)    (1000/100ms)
+Component 1: Kafka Client (kafka_client.py)
+How it consumes messages:
+python
+async def _consume_loop(self):
+    while self.running:
+        # Poll Kafka for messages (max 500 at a time)
+        batch = await self.consumer.getmany(timeout_ms=1000, max_records=500)
+        
+        for tp, messages in batch.items():
+            for msg in messages:
+                # Process each message (convert to StatusUpdate)
+                update = await self._process_message(msg)
+                # Add to queue for batching
+                await self.update_queue.put(update)
+            
+            # Commit offset AFTER successful processing
+            await self.consumer.commit({tp: messages[-1].offset + 1})
+Key Kafka Settings:
+
+python
+enable_auto_commit=False  # Manual commit = exactly-once processing
+max_poll_records=500      # Don't overwhelm the queue
+session_timeout_ms=30000  # 30s heartbeat timeout
+heartbeat_interval_ms=3000 # Heartbeat every 3s
+Why manual commit?
+If service crashes after processing but before committing, messages are reprocessed
+
+If service crashes before processing, messages are processed by another consumer
+
+Exactly-once semantics (well, at-least-once with idempotent updates)
+
+Component 2: The Batch Queue
+python
+self.update_queue = asyncio.Queue(maxsize=10000)
+This queue acts as a buffer between the fast Kafka consumer and the slower database:
+
+text
+Kafka Consumer ──▶ Queue ──▶ Batch Processor
+   4000 msgs/sec      │         4 batches/sec
+                      ▼
+              (acts as shock absorber)
+Why a queue?
+
+Decouples consumption from processing
+
+Handles spikes in message volume
+
+Prevents backpressure on Kafka
+
+Component 3: Batch Processor
+The batch processor is the heart of Layer 4:
+
+python
+async def _batch_processor(self):
+    while self.running:
+        batch = []
+        batch_start = time.time()
+        
+        # Collect until size OR timeout
+        while len(batch) < BATCH_SIZE:
+            remaining_time = BATCH_TIMEOUT_MS - (time.time() - batch_start) * 1000
+            if remaining_time <= 0:
+                break
+            
+            try:
+                update = await asyncio.wait_for(
+                    self.update_queue.get(), 
+                    timeout=remaining_time/1000
+                )
+                batch.append(update)
+            except asyncio.TimeoutError:
+                break
+        
+        # Process the batch
+        await self._process_batch(batch)
+Batch formation logic:
+
+text
+Time 0ms: First message arrives → start timer
+Time 10ms: 100 messages in queue
+Time 50ms: 500 messages in queue
+Time 100ms: TIMEOUT! Process 500 messages (even though not at 1000)
+           OR
+Time 80ms: 1000 messages reached → PROCESS IMMEDIATELY
+Component 4: Database Client (db_client.py)
+Connection Pooling
+python
+self.pool = await asyncpg.create_pool(
+    min_size=5,
+    max_size=MAX_DB_CONNECTIONS,  # Default 20
+    max_queries=50000,  # Reconnect after 50k queries
+    max_inactive_connection_lifetime=300  # 5 minutes
+)
+Why connection pooling?
+
+Creating connections is expensive (TCP handshake, auth)
+
+20 connections can handle 4000 concurrent queries
+
+Connections are reused, not recreated
+
+Batch Update Query
+sql
+UPDATE campaigns_messagestatus
+SET 
+    status = COALESCE($2, status),
+    provider_message_id = COALESCE($3, provider_message_id),
+    provider_response = COALESCE($4, provider_response),
+    attempts = COALESCE($5, attempts),
+    delivered_at = COALESCE($6, delivered_at),
+    updated_at = NOW()
+WHERE message_id = $1
+Why COALESCE?
+
+Each update may have different fields set
+
+Only update fields that are provided
+
+Preserve existing values for missing fields
+
+Component 5: API Client (api_client.py)
+Token Management
+python
+async def get_valid_token(self):
+    async with self.lock:
+        if time.time() >= self.token_expiry - 60:
+            await self._refresh_token()
+        return self.access_token
+Token refresh strategy:
+
+Tokens expire in 5 minutes (300 seconds)
+
+Refresh 60 seconds before expiry
+
+Use lock to prevent multiple simultaneous refreshes
+
+If refresh fails, get new token with credentials
+
+Fallback API Call
+python
+async def update_message_status(self, update):
+    try:
+        token = await self.get_valid_token()
+        response = await self.client.patch(
+            f"{self.base_url}/api/message-statuses/{update.message_id}/",
+            headers={"Authorization": f"Bearer {token}"},
+            json=payload
+        )
+        return response.status_code == 200
+    except Exception as e:
+        self.stats["api_errors"] += 1
+        return False
+Component 6: Updater Engine (updater_engine.py)
+This is the conductor that orchestrates everything:
+
+python
+class StatusUpdater:
+    def __init__(self):
+        self.db_client = DatabaseClient()      # Database access
+        self.api_client = APIClient()          # API fallback
+        self.consumer = KafkaClient(           # Kafka consumer
+            db_client=self.db_client,
+            api_client=self.api_client
+        )
+    
+    async def start(self):
+        # 1. Connect to database
+        await self.db_client.connect()
+        
+        # 2. Initialize API client (get token)
+        await self.api_client.get_valid_token()
+        
+        # 3. Start Kafka consumer
+        await self.consumer.start()
+        
+        # 4. Start stats reporter
+        asyncio.create_task(self._stats_reporter())
+📈 Performance Deep Dive
+Throughput Calculation
+text
+Target: 4000 TPS from Layer 3
+Batch size: 1000
+→ 4 batches per second
+
+Database query time: 10ms per batch
+→ 40ms of DB work per second (4% utilization)
+
+Queue size calculation:
+- Max queue: 10,000 messages
+- At 4000 TPS, queue fills in 2.5 seconds
+- Enough time for DB to recover from temporary issues
+Memory Usage
+text
+Per message in queue: ~500 bytes (JSON)
+Queue size 10,000 → ~5MB RAM
+Plus overhead: ~10MB total
+Perfectly fine for a container
+Database Connection Pool
+text
+20 connections × 1000 updates/batch × 10ms = 200,000 updates/sec theoretical max
+Our need: 4000 updates/sec → 2% utilization
+Massive headroom for spikes
+Kafka Consumer Lag
+text
+Lag = Messages in topic not yet processed
+If DB is slow, lag grows:
+- 1 minute at half speed (2000 TPS) → 120,000 lag
+- Consumer catches up when DB recovers
+- Kafka can hold billions of messages
+🔍 Monitoring & Observability Deep Dive
+Key Metrics Explained
+1. Database Updates
+python
+self.stats = {
+    "updates": 1500000,  # Total updates since start
+    "batches": 1500,      # Number of batches processed
+    "errors": 23          # Failed updates
+}
+What to watch:
+
+updates should match Layer 3's sent count
+
+errors should be < 0.1% of updates
+
+batches × 1000 ≈ updates (if batches are full)
+
+2. Kafka Lag
+python
+lag_by_partition = {
+    "sms-send-status-0": 0,
+    "sms-delivery-status-0": 50
+}
+Interpretation:
+
+0 lag = Processing in real-time
+
+Growing lag = Processing slower than production
+
+Sustained lag = Need more workers or faster DB
+
+3. API Client Stats
+python
+api_stats = {
+    "token_refreshes": 12,     # ~12/hour (every 5 min)
+    "api_calls": 230,          # Fallback calls
+    "api_errors": 23,          # Failed fallback calls
+    "fallback_updates": 207     # Successful fallback updates
+}
+Health indicators:
+
+token_refreshes should be regular (every 5 min)
+
+api_errors should be low (< 1%)
+
+fallback_updates = api_calls - api_errors
+
+Health Check Endpoint
+python
+@app.get("/health")
+async def health():
+    return {
+        "status": "healthy",
+        "kafka_lag": 50,
+        "db_updates": 1500000,
+        "db_errors": 23
+    }
+Used by:
+
+Kubernetes liveness probe (is container alive?)
+
+Kubernetes readiness probe (is container ready for traffic?)
+
+Load balancers
+
+Monitoring systems
+
+🚨 Failure Scenarios Deep Dive
+Scenario 1: Database Connection Lost
+text
+Event: PostgreSQL goes down or network disconnected
+
+Detection:
+- db_client.batch_update_statuses() starts failing
+- Errors increment in stats
+- Health check starts failing
+
+Immediate Response:
+1. Failed updates are NOT committed to Kafka
+2. They remain in the queue for retry
+3. Fallback to API client is attempted
+
+Queue Behavior:
+- Updates accumulate in queue (up to 10,000)
+- Queue fills in ~2.5 seconds at 4000 TPS
+- After queue full, new messages are dropped (rare)
+
+Recovery:
+1. Database comes back online
+2. Queue processes backlog at full speed
+3. Lag gradually decreases
+4. Normal operation resumes
+
+Monitoring Alert:
+- "High database error rate"
+- "Kafka lag growing rapidly"
+Scenario 2: Kafka Consumer Stops
+text
+Event: Kafka broker unavailable or consumer crashes
+
+Detection:
+- No messages received for >30 seconds
+- consumer.is_connected becomes false
+- Health check fails
+
+Immediate Response:
+1. Service stops processing
+2. No updates to database
+3. No commits to Kafka
+
+Queue Behavior:
+- Queue empties as batches finish
+- No new messages arrive
+
+Recovery:
+1. Kafka comes back online
+2. Consumer reconnects and rebalances
+3. Starts from last committed offset
+4. Processes backlog
+
+Monitoring Alert:
+- "Kafka consumer disconnected"
+- "Zero message rate"
+Scenario 3: Both DB and API Fail
+text
+Event: Complete outage of Django stack
+
+Detection:
+- db_client updates fail
+- api_client updates also fail
+- Every update in batch fails
+
+Immediate Response:
+1. Updates fail completely
+2. Messages are LOST (can't be recovered)
+3. Error count skyrockets
+
+Queue Behavior:
+- Queue processes batches
+- Every batch fails completely
+- Offsets still committed (to avoid infinite loop)
+- Messages are acknowledged as processed
+
+Recovery:
+1. Systems come back online
+2. New messages will be processed
+3. But failed messages are GONE FOREVER
+
+Prevention:
+- This is why we have dual-path!
+- Should never happen if at least one path works
+- Critical alert if both fail
+
+Monitoring Alert:
+- "CRITICAL: All update paths failed"
+- "Data loss possible"
+- Page on-call engineer immediately
+Scenario 4: High Memory Usage
+text
+Event: Queue grows beyond expected size
+
+Detection:
+- update_queue.qsize() approaching 10,000
+- Memory usage increasing
+- Processing slower than consumption
+
+Causes:
+- Database slow (high latency)
+- API fallback slow
+- Too few workers
+
+Immediate Response:
+1. Queue hits maxsize (10,000)
+2. New messages are DROPPED
+3. Data loss begins
+
+Prevention:
+- Monitor queue size
+- Alert at 8,000 (80% full)
+- Increase batch size or workers
+
+Recovery:
+1. Identify bottleneck
+2. Scale up or fix issue
+3. Queue drains naturally
+Scenario 5: Token Expiry During Processing
+text
+Event: API token expires in middle of batch
+
+Detection:
+- api_client.update_message_status() gets 401
+- Token refresh triggered
+
+Immediate Response:
+1. First request fails with 401
+2. Token refresh initiated
+3. Other requests in batch continue failing
+4. After refresh, subsequent requests succeed
+
+Queue Behavior:
+- Failed requests stay in queue
+- They will be retried in next batch
+- No data loss
+
+Monitoring Alert:
+- No alert needed (normal operation)
+- But track token_refreshes metric
+- Sudden increase might indicate issue
+📊 Statistics Deep Dive
+What Each Stat Tells You
+Database Stats
+Stat	Good Range	Bad Range	Meaning
+updates	Growing	Flat	Service is working
+batches	updates/1000	Much lower	Batches aren't full
+errors	<0.1% of updates	>1%	Database issues
+Kafka Stats
+Stat	Good Range	Bad Range	Meaning
+messages_received	Growing	Flat	Consumer working
+send_events	~50% of total	Wrong ratio	Check Layer 3
+delivery_events	~50% of total	Wrong ratio	Check provider
+batch_errors	<0.1%	>1%	Processing issues
+kafka_lag	Near 0	Growing	Can't keep up
+API Client Stats
+Stat	Good Range	Bad Range	Meaning
+token_refreshes	~12/hour	Much higher	Token issues
+api_calls	<1% of updates	>10%	DB failing too much
+api_errors	<10% of calls	>50%	API problems
+🔧 Tuning Guide
+When to Increase BATCH_SIZE
+text
+Symptoms:
+- Database CPU < 20%
+- Batch timeout always reached (not size)
+- Queue always empty
+
+Action:
+- Increase BATCH_SIZE to 2000
+- Monitor database impact
+- Check if latency increases
+When to Decrease BATCH_SIZE
+text
+Symptoms:
+- Database CPU > 80%
+- Query latency > 100ms
+- Updates failing due to timeouts
+
+Action:
+- Decrease BATCH_SIZE to 500
+- Reduce load on database
+- Add more connections if needed
+When to Increase MAX_DB_CONNECTIONS
+text
+Symptoms:
+- Connection pool exhausted
+- "too many clients" errors
+- Queue growing rapidly
+
+Action:
+- Increase to 30 or 40
+- Check PostgreSQL max_connections
+- Monitor system resources
+When to Add More Workers
+text
+Symptoms:
+- Single partition lag growing
+- CPU < 50%
+- Queue always empty
+
+Note: Kafka partitions limit parallelism
+- Can't have more consumers than partitions
+- Add partitions in Kafka first
+- Then increase workers
+🏗️ Design Decisions & Tradeoffs
+Why Batch Updates Instead of Individual?
+Approach	Pros	Cons
+Individual	Simple, real-time	4000 DB queries/sec ❌
+Batched	Efficient, scalable	Slight delay (100ms) ✅
+Decision: Batch with 100ms timeout - good balance of efficiency and latency
+
+Why Queue Between Consumer and DB?
+Approach	Pros	Cons
+Direct	Simple	DB slow → consumer blocks ❌
+Queued	Decoupled, resilient	Extra complexity ✅
+Decision: Queue protects consumer from DB issues
+
+Why Two Update Paths?
+Path	When	Why
+Direct DB	99% of time	Fast, efficient
+API Fallback	1% of time	Reliable, but slow
+Decision: Primary path for speed, fallback for reliability
+
+Why Manual Kafka Commits?
+Mode	Pros	Cons
+Auto-commit	Simple	May lose messages ❌
+Manual	Exactly-once	More complex ✅
+Decision: Manual commits prevent data loss
+
+Why Connection Pooling?
+Approach	Pros	Cons
+Single connection	Simple	Can't parallelize ❌
+Pool	Parallel, efficient	More complex ✅
+Decision: Pool handles 4000 TPS easily
+
+📝 Summary
+Layer 4 is a sophisticated, resilient status updater that:
+
+Consumes 4000+ events per second from Kafka
+
+Batches them for database efficiency (1000/batch)
+
+Updates PostgreSQL directly (primary path)
+
+Falls back to Django API when needed
+
+Tracks every message through its lifecycle
+
+Monitors itself with comprehensive stats
+
+Survives failures with graceful degradation
