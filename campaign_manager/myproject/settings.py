@@ -1,26 +1,19 @@
-
-
 import os
 from pathlib import Path
 from datetime import timedelta
-# Build paths inside the project like this: BASE_DIR / 'subdir'.
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Build paths
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-
-# Quick-start development settings - unsuitable for production
-# See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
-
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', 'django-insecure-j%e^1mov931g1ux4c_cz*a^qdcve)iy-a(s@$l=v-@n$h=t+!3')
-
-# SECURITY WARNING: don't run with debug turned on in production!
+# =============== SECURITY ===============
+SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', 'django-insecure-your-key-here-change-in-production')
 DEBUG = os.environ.get('DEBUG', 'True') == 'True'
+ALLOWED_HOSTS = ['localhost', '127.0.0.1', 'django-app', 'campaign-db', '0.0.0.0']
 
-ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1,django-app').split(',')
-
-
-# Application definition
-
+# =============== APPLICATION DEFINITION ===============
 INSTALLED_APPS = [
     'django.contrib.admin',
     'django.contrib.auth',
@@ -28,68 +21,13 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
-    
-    # Third party apps
     'rest_framework',
+    'rest_framework_simplejwt',
     'corsheaders',
-    'drf_yasg',
-    'drf_spectacular',  # Add this
-    'drf_spectacular_sidecar',  # Optional - for offline assets
-    # Your apps
+    'drf_spectacular',
+    'drf_spectacular_sidecar',
     'scheduler_manager',
 ]
-
-# drf-spectacular settings
-SPECTACULAR_SETTINGS = {
-    'TITLE': 'SMS Campaign Manager API',
-    'DESCRIPTION': '''
-    Comprehensive API for managing SMS campaigns with multi-language support.
-    
-    ## Features
-    - Campaign CRUD operations
-    - Multi-language message templates (EN, AM, TI, OM, SO)
-    - Audience management with recipient validation
-    - Campaign scheduling with time windows
-    - Progress tracking and monitoring
-    - Batch processing status
-    - Message delivery status tracking
-    - JWT Authentication
-    
-    ## Authentication
-    All endpoints except user registration require JWT authentication.
-    Obtain token via `/api/token/` endpoint.
-    ''',
-    'VERSION': '1.0.0',
-    'SERVE_INCLUDE_SCHEMA': False,
-    'COMPONENT_SPLIT_REQUEST': True,
-    'SWAGGER_UI_SETTINGS': {
-        'deepLinking': True,
-        'persistAuthorization': True,
-        'displayOperationId': True,
-        'docExpansion': 'list',
-        'filter': True,
-    },
-    'TAGS': [
-        {'name': 'Campaigns', 'description': 'Complete campaign management (CRUD + actions)'},
-        {'name': 'Campaign - Schedule', 'description': 'Campaign schedule management'},
-        {'name': 'Campaign - Message Content', 'description': 'Multi-language message template management'},
-        {'name': 'Campaign - Audience', 'description': 'Campaign recipient management'},
-        {'name': 'Campaign - Progress', 'description': 'Campaign progress and monitoring'},
-        {'name': 'Campaign - Actions', 'description': 'Campaign control actions (start/stop/complete)'},
-        {'name': 'Schedules', 'description': 'View all campaign schedules'},
-        {'name': 'Message Status', 'description': 'Message delivery status tracking'},
-        {'name': 'Campaign Progress', 'description': 'Campaign progress overview'},
-        {'name': 'Batches', 'description': 'Message batch processing status'},
-        {'name': 'Users', 'description': 'User management and registration'},
-        {'name': 'Authentication', 'description': 'JWT authentication endpoints'},
-    ],
-    'ENUM_NAME_OVERRIDES': {
-        'CampaignStatusEnum': 'scheduler_manager.models.Campaign.STATUS_CHOICES',
-        'ChannelEnum': 'scheduler_manager.models.Campaign.CHANNEL_CHOICES',
-        'MessageStatusEnum': 'scheduler_manager.models.MessageStatus.MESSAGE_STATUS_CHOICES',
-        'BatchStatusEnum': 'scheduler_manager.models.BatchStatus.BATCH_STATUS_CHOICES',
-    },
-}
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
@@ -122,107 +60,41 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'myproject.wsgi.application'
 
-
-# Database
-# https://docs.djangoproject.com/en/5.2/ref/settings/#databases
-
-# DATABASES = {
-#     'default': {
-#         'ENGINE': 'django.db.backends.postgresql',
-#         'NAME': 'campaign_db',  # Should be campaign_db, not campaign_user
-#         'USER': 'campaign_user',
-#         'PASSWORD': 'campaign_pass',
-#         'HOST': 'campaign-db',
-#         'PORT': '5432',
-#     }
-# }
-
-# DATABASES = {
-#     'default': {
-#         'ENGINE': 'django.db.backends.postgresql',
-#         'NAME': 'postgres',  # Should be campaign_db, not campaign_user
-#         'USER': 'postgres',
-#         'PASSWORD': 'Efrem12.',
-#         'HOST': 'localhost',
-#         'PORT': '5432',
-#     }
-# }
-
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
-        # Optional: Add these for better performance
-        # 'OPTIONS': {
-        #     'timeout': 20,  # Increase timeout for busy database
-        #     'transaction_mode': 'IMMEDIATE',  # Better concurrency
-        # },
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': 'campaign_db',
+        'USER': 'campaign_user',
+        'PASSWORD': 'campaign_pass',
+        'HOST': 'campaign-db',
+        'PORT': '5432',
     }
 }
 
-# Password validation
-# https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators
-
 AUTH_PASSWORD_VALIDATORS = [
-    {
-        'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator',
-    },
-    {
-        'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator',
-    },
-    {
-        'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator',
-    },
-    {
-        'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator',
-    },
+    {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator'},
 ]
 
-
-# Internationalization
-# https://docs.djangoproject.com/en/5.2/topics/i18n/
-
 LANGUAGE_CODE = 'en-us'
-
 TIME_ZONE = 'UTC'
-
 USE_I18N = True
-
 USE_TZ = True
-
-
-# Static files (CSS, JavaScript, Images)
-# https://docs.djangoproject.com/en/5.2/howto/static-files/
 
 STATIC_URL = 'static/'
 STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
-
-# Default primary key field type
-# https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
-
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-# CORS settings
-CORS_ALLOWED_ORIGINS = [
-    "http://localhost:8080",
-    "http://127.0.0.1:8080",
-    "http://django-app:8000",
-    "http://172.27.131.128:8080",  # Your WSL IP
-]
+CORS_ALLOW_ALL_ORIGINS = True
 
-CORS_ALLOW_ALL_ORIGINS = True  # For development only - remove in production
-
-# REST Framework settings
 REST_FRAMEWORK = {
-    'DEFAULT_AUTHENTICATION_CLASSES': [
-        'rest_framework_simplejwt.authentication.JWTAuthentication',
-    ],
-    'DEFAULT_PERMISSION_CLASSES': [
-         'rest_framework.permissions.IsAuthenticated',  # Change for production
-    ],
+    'DEFAULT_AUTHENTICATION_CLASSES': ('rest_framework_simplejwt.authentication.JWTAuthentication',),
+    'DEFAULT_PERMISSION_CLASSES': ('rest_framework.permissions.IsAuthenticated',),
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 100,
-    
 }
 
 SIMPLE_JWT = {
@@ -230,21 +102,163 @@ SIMPLE_JWT = {
     'REFRESH_TOKEN_LIFETIME': timedelta(days=1),
     'ROTATE_REFRESH_TOKENS': False,
     'BLACKLIST_AFTER_ROTATION': True,
-}
-# Swagger settings
-SWAGGER_SETTINGS = {
-    'SECURITY_DEFINITIONS': None,
-    'USE_SESSION_AUTH': False,
-    'JSON_EDITOR': True,
-    'SUPPORTED_SUBMIT_METHODS': [
-        'get',
-        'post',
-        'put',
-        'delete',
-        'patch'
-    ],
+    'UPDATE_LAST_LOGIN': True,
+    'ALGORITHM': 'HS256',
+    'SIGNING_KEY': SECRET_KEY,
+    'AUTH_HEADER_TYPES': ('Bearer',),
+    'USER_ID_FIELD': 'id',
+    'USER_ID_CLAIM': 'user_id',
 }
 
-# Campaign Manager specific settings
-SCHEDULER_MANAGER_ENABLED = os.environ.get('SCHEDULER_MANAGER_ENABLED', 'True') == 'True'
-SMS_SERVICE_ENABLED = os.environ.get('SMS_SERVICE_ENABLED', 'False') == 'False'
+# =============== SPECTACULAR (SWAGGER) SETTINGS ===============
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'Campaign Manager API',
+    'DESCRIPTION': '''
+    # Campaign Management System API
+    
+    API for managing SMS campaigns with multi-language support, scheduling, and audience management.
+    
+    ## Authentication
+    All endpoints (except health check) require JWT authentication.
+    
+    **To authenticate:**
+    1. Call `POST /api/token/` with your username and password
+    2. Copy the `access` token from the response
+    3. Click the "Authorize" button and enter: `Bearer <your-access-token>`
+    
+    ## API Categories
+    
+    ### 📱 Campaign Management
+    Complete CRUD operations for campaigns plus lifecycle actions (start, pause, resume, stop, complete)
+    
+    ### ⏰ Schedule Management
+    Configure one-time or recurring schedules (daily, weekly, monthly) with multiple time windows
+    
+    ### 👥 Audience Management
+    Upload and manage recipient lists with phone number validation and language support
+    
+    ### 📝 Message Content Management
+    Multi-language message templates with variable substitution support
+    
+    ### 📊 Message Status Tracking
+    Track message delivery status and provider responses
+    
+    ### 📈 Progress Monitoring
+    Monitor campaign execution progress and batch status
+    
+    ### 👤 User Management
+    User registration and profile management
+    ''',
+    'VERSION': '1.0.0',
+    'SERVE_INCLUDE_SCHEMA': False,
+    'SWAGGER_UI_SETTINGS': {
+        'deepLinking': True,
+        'persistAuthorization': True,
+        'displayOperationId': True,
+        'displayRequestDuration': True,
+        'filter': True,
+        'tryItOutEnabled': True,
+        'syntaxHighlight': {
+            'activated': True,
+            'theme': 'monokai'
+        },
+        'layout': 'BaseLayout',
+        'docExpansion': 'list',
+        'defaultModelsExpandDepth': 3,
+        'defaultModelExpandDepth': 3,
+    },
+    'SWAGGER_UI_DIST': 'SIDECAR',
+    'SWAGGER_UI_FAVICON_HREF': 'SIDECAR',
+    'REDOC_DIST': 'SIDECAR',
+    'TAGS': [
+        # Campaign Management
+        {
+            'name': 'Campaigns',
+            'description': '📱 **Campaign Management** - Create, read, update, and delete campaigns'
+        },
+        {
+            'name': 'Campaigns - Actions',
+            'description': '▶️ **Campaign Lifecycle** - Start, pause, resume, stop, complete, and archive campaigns'
+        },
+        {
+            'name': 'Campaigns - Progress',
+            'description': '📈 **Campaign Progress** - View progress, statistics, and batches'
+        },
+        
+        # Schedule Management
+        {
+            'name': 'Schedules',
+            'description': '⏰ **Schedule Management** - Configure one-time or recurring schedules (daily, weekly, monthly)'
+        },
+        
+        # Audience Management
+        {
+            'name': 'Audiences',
+            'description': '👥 **Audience Management** - Upload and manage recipient lists with validation'
+        },
+        
+        # Message Content
+        {
+            'name': 'Message Contents',
+            'description': '📝 **Message Templates** - Multi-language content with variable substitution'
+        },
+        
+        # Message Status
+        {
+            'name': 'Message Statuses',
+            'description': '📊 **Delivery Tracking** - Track message status and provider responses'
+        },
+        
+        # Progress Monitoring
+        {
+            'name': 'Campaign Progress',
+            'description': '📈 **Execution Monitoring** - Track campaign execution progress'
+        },
+        
+        # Checkpoints
+        {
+            'name': 'Checkpoints',
+            'description': '🔍 **Processing Checkpoints** - Resumable campaign execution tracking'
+        },
+        
+        # Batches
+        {
+            'name': 'Batches',
+            'description': '📦 **Batch Management** - Track message batches'
+        },
+        
+        # User Management
+        {
+            'name': 'Users',
+            'description': '👤 **User Management** - Registration, profile, and password management'
+        },
+        
+        # Authentication
+        {
+            'name': 'Authentication',
+            'description': '🔐 **JWT Authentication** - Obtain and refresh access tokens'
+        },
+        
+        # System
+        {
+            'name': 'System',
+            'description': '🏥 **System Health** - Health checks and system information'
+        },
+    ],
+    'COMPONENT_SPLIT_REQUEST': True,
+    'SORT_OPERATIONS': False,
+    'ENABLE_DJANGO_DEPLOY_CHECK': False,
+    'SCHEMA_PATH_PREFIX': '/api/',
+}
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'simple': {'format': '{levelname} {asctime} {message}', 'style': '{'},
+    },
+    'handlers': {
+        'console': {'class': 'logging.StreamHandler', 'formatter': 'simple'},
+    },
+    'root': {'handlers': ['console'], 'level': 'INFO'},
+}

@@ -7,7 +7,7 @@ from typing import Optional
 from .config import config
 from .models import CampaignStatus, BatchProgress
 from .api_client import CampaignAPIClient
-from .database import DatabaseClient
+from .db_client import DatabaseClient  # FIXED: changed from .database to .db_client
 from .redis_client import RedisQueueClient
 from .message_builder import MessageBuilder
 from .kafka_client import KafkaProducerClient

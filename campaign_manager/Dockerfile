@@ -1,48 +1,35 @@
-# django_project/Dockerfile
 FROM python:3.10-slim
 
-# Set environment variables
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-ENV PYTHONPATH=/app
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app \
+    DJANGO_SETTINGS_MODULE=myproject.settings \
+    PORT=8000
 
-# Set work directory
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-    gcc \
-    libpq-dev \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq5 \
     curl \
-    netcat-openbsd && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+    netcat-openbsd \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements file from django_project directory
-COPY django_project/requirements.txt /app/requirements.txt
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir django==4.2.7  # Explicitly install Django as backup
+COPY . .
 
-# Copy the entire django_project
-COPY django_project /app/
+RUN mkdir -p /app/static /app/media /app/logs && \
+    useradd -m -u 1000 appuser && \
+    chown -R appuser:appuser /app
 
-# Create a simple check script
-RUN echo '#!/bin/bash\n\
-echo "Checking Django installation..."\n\
-python -c "import django; print(f\"Django version: {django.get_version()}\")"\n\
-echo "Waiting for database at $DB_HOST:$DB_PORT..."\n\
-while ! nc -z $DB_HOST $DB_PORT; do\n\
-  sleep 1\n\
-done\n\
-echo "Database ready!"\n\
-python manage.py migrate --noinput\n\
-echo "✅ Migrations complete"\n\
-echo "Starting Django server..."\n\
-exec python manage.py runserver 0.0.0.0:8000' > /app/entrypoint.sh && \
-    chmod +x /app/entrypoint.sh
+USER appuser
 
-# Run the application
-CMD ["/app/entrypoint.sh"]
+EXPOSE 8000
+
+CMD ["sh", "-c", "\
+    echo 'Waiting for database...' && \
+    while ! nc -z ${DB_HOST:-campaign-db} ${DB_PORT:-5432}; do sleep 1; done && \
+    echo 'Database ready!' && \
+    python manage.py migrate --noinput && \
+    python manage.py runserver 0.0.0.0:8000"]

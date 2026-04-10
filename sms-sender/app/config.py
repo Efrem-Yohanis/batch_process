@@ -21,7 +21,7 @@ class Config:
         "BATCH_SIZE": "1000",
         "MAX_TPS": "4000",
         "WORKER_COUNT": "4",
-        "MAX_RETRIES": "3",
+        "MAX_RETRIES": "",
         "RETRY_DELAYS": "[60, 300, 900]",
         "HEALTH_PORT": "8004",
         "HTTP_PORT": "8002"

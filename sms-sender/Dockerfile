@@ -1,28 +1,21 @@
 FROM python:3.11-slim
 
-WORKDIR /app
-
-# Install system dependencies
+# Install build dependencies
 RUN apt-get update && apt-get install -y \
     gcc \
+    g++ \
+    libffi-dev \
+    python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
+WORKDIR /app
+
 # Install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir \
+    fastapi==0.104.1 \
+    uvicorn[standard]==0.24.0 \
+    pydantic==2.4.2
 
-# Copy application code
-COPY app/ ./app/
+COPY mock_sms_provider.py .
 
-# Create log directory
-RUN mkdir -p /app/logs/layer3
-
-# Run as non-root user
-RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
-USER appuser
-
-# Expose ports (main app)
-EXPOSE 8002 8004
-
-# Run the application
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8002"]
+CMD ["uvicorn", "mock_sms_provider:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -13,7 +13,7 @@ from .config import config
 from .logger import logger
 from . import __version__, __description__
 from .api_client import CampaignAPIClient
-from .database import DatabaseClient
+from .db_client import DatabaseClient  # FIXED: changed from .database to .db_client
 from .redis_client import RedisQueueClient
 from .kafka_client import KafkaConsumerClient, KafkaProducerClient
 from .campaign_engine import CampaignEngine
@@ -25,6 +25,7 @@ health_app = FastAPI()
 @health_app.get("/health")
 async def health():
     """Health check endpoint."""
+    # Import here to avoid circular imports
     from .main import app as main_app
     
     api_ok, api_status = await main_app.state.api_client.check_api_health()

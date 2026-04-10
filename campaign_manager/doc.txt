@@ -1,0 +1,514 @@
+Core Purpose
+The Campaign Manager is the central nervous system of the entire SMS campaign ecosystem. It's a Django-based application that serves as the single source of truth for all campaign data, configuration, and status tracking. It provides the APIs and data models that power all four layers of the microservices architecture.
+
+Think of it as:
+
+The Database - Stores all campaign information
+
+The Configuration Hub - Manages templates, schedules, audiences
+
+The State Tracker - Tracks every message's journey
+
+The API Gateway - Provides endpoints for all layers to interact with
+
+🏗️ High-Level Architecture
+text
+                    ┌─────────────────────────────────────┐
+                    │      Campaign Manager App           │
+                    │         (Django + PostgreSQL)       │
+                    └─────────────────────────────────────┘
+                                      │
+        ┌─────────────────────────────┼─────────────────────────────┐
+        │              │              │              │              │
+        ▼              ▼              ▼              ▼              ▼
+┌───────────────┐ ┌───────────────┐ ┌───────────────┐ ┌───────────────┐ ┌───────────────┐
+│   Campaign    │ │   Schedule    │ │   Message     │ │   Audience    │ │   Message     │
+│    Core       │ │   Management  │ │   Content     │ │   Management  │ │   Status      │
+└───────────────┘ └───────────────┘ └───────────────┘ └───────────────┘ └───────────────┘
+📊 What It Actually Does
+1. Campaign Lifecycle Management
+Manages campaigns from creation to completion:
+
+text
+┌─────────┐     ┌─────────┐     ┌─────────┐     ┌─────────┐     ┌─────────┐
+│  Draft  │────▶│ Active  │────▶│ Paused  │────▶│Complete │────▶│Archived │
+└─────────┘     └─────────┘     └─────────┘     └─────────┘     └─────────┘
+     │               │               │               │               │
+     ▼               ▼               ▼               ▼               ▼
+  Configure      Running         Temporary        All msgs        Historical
+  Campaign       Campaign         Stop            Sent            Record
+What it tracks:
+
+Campaign name, status, timestamps
+
+Who created it
+
+Soft delete capability (is_deleted flag)
+
+Execution status (PENDING, PROCESSING, PAUSED, etc.)
+
+2. Schedule Configuration
+Supports both one-time and recurring campaigns with sophisticated scheduling:
+
+python
+# One-time campaign
+schedule = {
+    'type': 'once',
+    'start_date': '2024-01-01',
+    'time_windows': [{'start': '09:00', 'end': '17:00'}]
+}
+
+# Daily recurring
+schedule = {
+    'type': 'daily',
+    'start_date': '2024-01-01',
+    'end_date': '2024-12-31',
+    'time_windows': [
+        {'start': '08:00', 'end': '12:00'},
+        {'start': '14:00', 'end': '18:00'}
+    ]
+}
+
+# Weekly recurring (Mon, Wed, Fri)
+schedule = {
+    'type': 'weekly',
+    'run_days': [0, 2, 4],  # Monday=0, Wednesday=2, Friday=4
+    'time_windows': [{'start': '10:00', 'end': '16:00'}]
+}
+
+# Monthly recurring
+schedule = {
+    'type': 'monthly',
+    'start_date': '2024-01-15',  # Run on 15th of each month
+    'time_windows': [{'start': '09:00', 'end': '17:00'}]
+}
+Schedule intelligence:
+
+Automatically calculates next run date/time
+
+Tracks current execution window
+
+Manages multiple time windows per day
+
+Handles timezone awareness
+
+Auto-resets for recurring campaigns
+
+3. Multi-Language Message Content
+Manages message templates in multiple languages:
+
+python
+message_content = {
+    'en': "Hello {{name}}, your offer expires today!",
+    'am': "ሰላም {{name}}፣ የእርስዎ ቅናሽ ዛሬ ያበቃል!",
+    'ti': "ሰላም {{name}}፣ ዝቕረብኩም ሎሚ ይዛዘም!",
+    'om': "Akkam {{name}},"
+}
+Features:
+
+Exactly 5 supported languages (en, am, ti, om, so)
+
+Default language selection
+
+Validation for all languages present
+
+Preview capability
+
+Placeholder support ({{variable}})
+
+4. Audience Management
+Handles millions of recipients with validation:
+
+python
+audience = [
+    {
+        'msisdn': '+251911234567',
+        'lang': 'am',
+        'variables': {'name': 'Abebe', 'city': 'Addis Ababa'}
+    },
+    {
+        'msisdn': '+251922345678',
+        'lang': 'en',
+        'variables': {'name': 'John', 'account': '12345'}
+    }
+]
+Validation:
+
+E.164 phone number format
+
+Language must be supported
+
+Variables can be any JSON object
+
+Automatic counting (valid/invalid/total)
+
+5. Direct Database Access for Layer 2
+Provides metadata for Layer 2 to access audience directly:
+
+python
+database_info = {
+    'table': 'scheduler_manager_audience',
+    'id_field': 'id',
+    'filter': "campaign_id = 123 AND status = 'PENDING'"
+}
+This allows Layer 2 to stream millions of recipients directly via SQL instead of API calls.
+
+6. Progress Tracking
+Tracks campaign execution in real-time:
+
+python
+progress = {
+    'total_messages': 1000000,
+    'sent_count': 450000,
+    'delivered_count': 440000,
+    'failed_count': 5000,
+    'pending_count': 545000,
+    'progress_percent': 45.5,
+    'status': 'ACTIVE'
+}
+7. Batch Status Tracking
+Groups messages into batches for efficiency:
+
+python
+batch = {
+    'batch_id': 'batch_abc123',
+    'total_messages': 50000,
+    'success_count': 49800,
+    'failed_count': 200,
+    'status': 'COMPLETED'
+}
+8. Message Status Tracking (The Big One)
+The high-volume table tracking every single message:
+
+python
+message_status = {
+    'message_id': 'msg_xyz789',
+    'campaign_id': 123,
+    'batch_id': 'batch_abc123',
+    'phone_number': '+251911234567',
+    'status': 'DELIVERED',  # PENDING, SENT, DELIVERED, FAILED
+    'attempts': 1,
+    'provider_message_id': 'prov_12345',
+    'sent_at': '2024-01-01T10:00:00Z',
+    'delivered_at': '2024-01-01T10:00:05Z'
+}
+9. Checkpointing for Resumable Processing
+Enables Layer 2 to resume from where it left off:
+
+python
+checkpoint = {
+    'last_processed_index': 450000,
+    'total_to_process': 1000000,
+    'status': 'RUNNING'
+}
+10. API Layer
+Provides RESTful APIs for all microservices:
+
+Layer	Endpoints	Purpose
+Layer 1	/campaigns/{id}/summary/	Validation before starting
+Layer 2	/campaigns/{id}/message-content/	Get templates
+/campaigns/{id}/audience/	Get audience DB info
+/campaigns/{id}/checkpoint/	Get checkpoint
+/campaigns/{id}/update_checkpoint/	Update progress
+Layer 4	/message-statuses/bulk_create/	Create statuses
+/message-statuses/bulk_update/	Update statuses
+🔧 How It Works - Deep Technical Dive
+Data Flow Through the System
+text
+1. User creates campaign via API
+   └── Campaign object created
+       ├── Schedule created (auto-initialized)
+       ├── MessageContent created (empty templates)
+       ├── Audience created (with validation)
+       ├── Progress created (starts at 0)
+       └── Checkpoint created (starts at 0)
+
+2. User uploads audience
+   └── Audience validated and counts updated
+       ├── total_count = total recipients
+       ├── valid_count = valid numbers
+       └── invalid_count = invalid numbers
+
+3. User starts campaign
+   └── Campaign status: draft → active
+       ├── Execution status: PENDING → PROCESSING
+       ├── Schedule finds next window
+       └── START command sent to Kafka
+
+4. Layer 2 processes campaign
+   └── Fetches campaign data via API
+       ├── Gets message templates
+       ├── Gets audience DB info
+       ├── Gets checkpoint
+       └── Streams recipients from DB
+
+5. Layer 2 updates checkpoint
+   └── POST /campaigns/{id}/update_checkpoint/
+       ├── last_processed_id updated
+       ├── total_processed updated
+       └── Checkpoint status updated
+
+6. Layer 3 sends messages
+   └── No direct DB access
+       ├── Publishes SEND_STATUS to Kafka
+       └── Publishes DELIVERY_STATUS to Kafka
+
+7. Layer 4 consumes Kafka events
+   └── Bulk creates/updates message statuses
+       ├── POST /message-statuses/bulk_create/
+       └── POST /message-statuses/bulk_update/
+
+8. Progress auto-updates via signals
+   └── Message status changes trigger:
+       ├── BatchStatus update
+       ├── CampaignProgress update
+       └── Campaign totals update
+
+9. Campaign auto-completes
+   └── When all messages processed:
+       ├── Campaign status: active → completed
+       ├── Execution status: PROCESSING → COMPLETED
+       ├── Schedule: completed
+       └── Progress: COMPLETED
+Key Technical Mechanisms
+1. Model Relationships
+python
+Campaign
+├── Schedule (One-to-One)  # When to send
+├── MessageContent (One-to-One)  # What to send
+├── Audience (One-to-One)  # Who to send to
+├── CampaignProgress (One-to-One)  # How it's going
+├── Checkpoint (One-to-One)  # Where we left off
+└── (via progress) BatchStatus (Foreign Key)  # Batches
+    └── MessageStatus (via batch_id)  # Individual messages
+2. Automatic Related Model Creation
+Signals ensure all related models exist:
+
+python
+@receiver(post_save, sender=Campaign)
+def create_campaign_related_models(sender, instance, created, **kwargs):
+    if created:
+        MessageContent.objects.get_or_create(campaign=instance)
+        CampaignProgress.objects.get_or_create(campaign=instance)
+        Checkpoint.objects.get_or_create(campaign=instance)
+3. Schedule Intelligence
+The schedule model automatically manages recurring windows:
+
+python
+def get_next_window(self):
+    if self.schedule_type == 'daily':
+        # Next day, same time
+        return next_date, 0
+    elif self.schedule_type == 'weekly':
+        # Find next allowed day of week
+        for days_ahead in range(14):
+            if candidate.weekday() in self.run_days:
+                return candidate, 0
+    elif self.schedule_type == 'monthly':
+        # Same day next month
+        return next_date + relativedelta(months=1), 0
+4. Audience Validation Pipeline
+python
+1. Input: List of recipients
+2. Validate each recipient:
+   - Is it a dict?
+   - Has msisdn and lang?
+   - Is msisdn in E.164 format?
+   - Is lang supported?
+3. Count valid/invalid
+4. Store counts in context
+5. Create Audience with counts
+5. Bulk Operations for Performance
+MessageStatus uses bulk operations for high throughput:
+
+python
+# Bulk create (Layer 2/3)
+MessageStatus.objects.bulk_create([
+    MessageStatus(**data) for data in messages
+])
+
+# Bulk update (Layer 4)
+MessageStatus.objects.filter(
+    message_id__in=message_ids
+).update(
+    status='DELIVERED',
+    delivered_at=timezone.now()
+)
+6. Signal-Based Progress Updates
+When message status changes, everything updates automatically:
+
+python
+@receiver(post_save, sender=MessageStatus)
+def update_batch_and_progress(sender, instance, created, **kwargs):
+    # Update batch
+    batch.success_count += 1
+    batch.update_status()
+    
+    # Update campaign progress
+    progress.increment_sent()
+    
+    # Update campaign totals
+    campaign.sent_count += 1
+7. Checkpoint System for Resumability
+Layer 2 updates checkpoint after each batch:
+
+python
+def update_checkpoint(self, last_id, processed):
+    checkpoint.last_processed_index = last_id
+    campaign.last_processed_id = last_id
+    campaign.total_processed = processed
+    checkpoint.save()
+    campaign.save()
+📈 Performance Characteristics
+Database Design for Scale
+Table	Size	Access Pattern	Indexes
+Campaign	Thousands	Occasional	status, created_by, execution_status
+Schedule	Thousands	Occasional	campaign_status, next_run_date
+MessageContent	Thousands	Occasional	default_language
+Audience	Thousands	Occasional	total_count
+CampaignProgress	Thousands	Frequent	status, progress_percent
+BatchStatus	Millions	Frequent	status, campaign_id_direct
+MessageStatus	Billions	Very Frequent	campaign_id, status, batch_id, created_at, provider_message_id
+Optimizations for High Volume
+No Foreign Keys in MessageStatus
+
+Uses campaign_id (Integer) instead of FK to Campaign
+
+Avoids join overhead during high TPS writes
+
+Strategic Indexes
+
+(campaign_id, status) - Most common query
+
+(batch_id) - Batch lookups
+
+(status, last_attempt) - Retry logic
+
+(provider_message_id) - Provider callbacks
+
+Bulk Operations
+
+Create 1000 messages in one query
+
+Update 1000 messages in one query
+
+Connection Pooling
+
+Reuses database connections
+
+Configurable pool size (default 20)
+
+🔍 Monitoring & Observability
+Key Metrics Available via API
+Campaign Summary
+
+Total campaigns by status
+
+Total by execution status
+
+Total by channel
+
+Aggregate recipient counts
+
+Message Status Summary
+
+Messages by status (PENDING, SENT, DELIVERED, FAILED)
+
+Messages by channel
+
+Messages by campaign (top 10)
+
+Recent trends (last hour)
+
+Batch Status
+
+Completed batches
+
+Failed batches
+
+Success rates
+
+Checkpoint Status
+
+Running campaigns
+
+Completed campaigns
+
+Progress percentages
+
+Health Check Endpoint
+python
+GET /health/
+{
+    "status": "healthy",
+    "timestamp": "2024-01-01T12:00:00Z",
+    "services": {
+        "database": "connected",
+        "api": "operational"
+    },
+    "version": "1.0.0",
+    "environment": "production"
+}
+🚨 Failure Scenarios & Recovery
+Scenario 1: Database Connection Lost
+text
+Impact: All API calls fail
+Detection: Health check fails, connection errors
+Recovery: Connection pool auto-reconnects
+Monitoring: Alert on sustained failures
+Scenario 2: Bulk Create Overload
+text
+Impact: Too many messages at once
+Protection: Batch size limits (1000 per request)
+Recovery: Client should retry with smaller batches
+Scenario 3: Checkpoint Desync
+text
+Impact: Layer 2 loses its place
+Detection: Checkpoint progress doesn't match actual
+Recovery: Manual reset or recompute from MessageStatus
+Prevention: Always update checkpoint before committing
+Scenario 4: Schedule Miscalculation
+text
+Impact: Campaign runs at wrong time
+Detection: Schedule monitoring
+Recovery: Manual adjustment via API
+Prevention: Extensive validation in clean() methods
+🏗️ Integration with Microservices
+Layer 1 (Ingestion)
+Validates campaign via /campaigns/{id}/summary/
+
+Gets sender_id, channels, audience counts
+
+Layer 2 (Executor)
+Fetches templates via /campaigns/{id}/message-content/
+
+Gets audience DB info via /campaigns/{id}/audience/
+
+Gets checkpoint via /campaigns/{id}/checkpoint/
+
+Updates progress via /campaigns/{id}/update_checkpoint/
+
+Layer 3 (Sender)
+No direct database access
+
+Publishes to Kafka only
+
+Layer 4 (Updater)
+Bulk creates via /message-statuses/bulk_create/
+
+Bulk updates via /message-statuses/bulk_update/
+
+📝 Summary
+The Campaign Manager is a sophisticated, production-ready Django application that:
+
+Stores everything - All campaign data in one place
+
+Validates everything - Phone numbers, languages, schedules
+
+Tracks everything - Every message's entire journey
+
+Scales everything - Designed for billions of messages
+
+Integrates everything - Clean APIs for all microservices
+
+It's the single source of truth that makes the entire SMS ecosystem work, providing the data, configuration, and tracking that all four layers depend on.

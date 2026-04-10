@@ -1,10 +1,15 @@
 """API route definitions."""
-from fastapi import APIRouter, HTTPException, BackgroundTasks, Request
+import os
 import logging
+from datetime import datetime
+
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Request
 
 from .models import CampaignCommand, CommandResponse
 from .services import CommandService
 from .config import config
+from .api_client import APIClient
+from .kafka_client import KafkaClient
 
 logger = logging.getLogger(config.SERVICE_NAME)
 router = APIRouter()

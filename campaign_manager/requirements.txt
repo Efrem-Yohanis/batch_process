@@ -1,12 +1,37 @@
+# =============== CORE DJANGO ===============
 Django==4.2.7
+psycopg2-binary==2.9.9          # PostgreSQL adapter
+python-dotenv==1.0.0             # Environment variables
+
+# =============== REST API ===============
 djangorestframework==3.14.0
-psycopg2-binary==2.9.9
-django-cors-headers==4.3.1
-python-dotenv==1.0.0
-requests==2.31.0
-drf-yasg==1.21.7
-redis==5.0.1
-kafka-python==2.0.2
-djangorestframework-simplejwt==5.3.1
-drf-spectacular==0.26.0
-drf-spectacular-sidecar==2023.10.1  # Optional - for offline Swagger UI
+djangorestframework-simplejwt==5.3.1  # JWT authentication
+django-cors-headers==4.3.1       # CORS support
+requests==2.31.0                  # HTTP client (for external API calls)
+
+# =============== API DOCUMENTATION ===============
+drf-yasg==1.21.7                  # Swagger/OpenAPI generator
+drf-spectacular==0.26.0           # OpenAPI 3 schema generation
+drf-spectacular-sidecar==2023.10.1  # Offline Swagger UI
+
+# =============== MESSAGE QUEUE & CACHE ===============
+redis==5.0.1                       # Redis client
+kafka-python==2.0.2                # Kafka producer/consumer (for microservices)
+
+# =============== UTILITIES ===============
+# Add these if needed:
+celery==5.3.4                    # Async task queue
+flower==2.0.1                     # Celery monitoring
+gunicorn==21.2.0                  # Production WSGI server
+whitenoise==6.5.0                 # Static files serving
+sentry-sdk==1.38.0                 # Error tracking
+django-debug-toolbar==4.2.0       # Debugging (development only)
+pytest==7.4.3                      # Testing
+pytest-django==4.5.2               # Django testing
+factory-boy==3.3.0                 # Test data generation
+faker==19.13.0                     # Fake data generation
+
+
+# =============== DATE UTILITIES ===============
+python-dateutil==2.8.2  # For relativedelta (used in schedule calculations)
+

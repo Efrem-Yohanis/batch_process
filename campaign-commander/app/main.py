@@ -1,4 +1,5 @@
 """Main FastAPI application entry point."""
+import logging
 import uuid
 import asyncio
 import os

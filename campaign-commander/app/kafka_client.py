@@ -21,16 +21,18 @@ class KafkaClient:
     
     async def connect(self) -> bool:
         """Connect to Kafka with retries."""
-        self.producer = AIOKafkaProducer(
-            bootstrap_servers=self.bootstrap_servers,
-            acks="all",
-            compression_type="gzip",
-            max_request_size=1048576  # 1MB
-        )
-        
         try:
+            self.producer = AIOKafkaProducer(
+                bootstrap_servers=self.bootstrap_servers,
+                acks="all",
+                compression_type="gzip",
+                max_request_size=10485760,  # 10MB - only once!
+                request_timeout_ms=40000,
+                metadata_max_age_ms=300000
+            )
+            
             await self.producer.start()
-            logger.info("Connected to Kafka")
+            logger.info(f"Connected to Kafka at {self.bootstrap_servers}")
             return True
         except Exception as e:
             logger.error(f"Failed to connect to Kafka: {e}")
@@ -78,7 +80,8 @@ class KafkaClient:
             message["reason"] = reason
         
         try:
-            await self.producer.send_and_wait(
+            # Use send instead of send_and_wait for better performance
+            await self.producer.send(
                 self.topic,
                 key=str(campaign_id).encode(),
                 value=json.dumps(message).encode()

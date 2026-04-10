@@ -11,8 +11,8 @@ class Config:
         "KAFKA_PROGRESS_TOPIC": "sms-batch-started",
         "KAFKA_CONSUMER_GROUP": "layer2-engine",
         "CAMPAIGN_MANAGER_URL": "http://django-app:8000",
-        "DJANGO_USERNAME": "test",
-        "DJANGO_PASSWORD": "test",
+        "DJANGO_USERNAME": "admin",
+        "DJANGO_PASSWORD": "admin123",
         "POSTGRES_DSN": "postgresql://campaign_user:campaign_pass@campaign-db:5432/campaign_db",
         "REDIS_URL": "redis://redis:6379/0",
         "REDIS_QUEUE_KEY": "sms:dispatch:queue",
@@ -35,7 +35,7 @@ class Config:
             if key not in os.environ:
                 os.environ[key] = value
         
-        # Kafka settings
+        # Kafka settings - NO HTTP PREFIX!
         self.KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS")
         self.KAFKA_COMMAND_TOPIC = os.getenv("KAFKA_COMMAND_TOPIC")
         self.KAFKA_PROGRESS_TOPIC = os.getenv("KAFKA_PROGRESS_TOPIC")
